@@ -1,4 +1,9 @@
 use rand::seq::SliceRandom;
+pub mod combo;
+pub mod game;
+
+pub use combo::*;
+pub use game::*;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 
