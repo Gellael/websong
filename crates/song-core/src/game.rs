@@ -149,7 +149,7 @@ impl GameState {
             }
         }
         if self.table.is_empty() {
-            self.finish(Outcome::AllDead, None, 0);
+            self.finish(Outcome::AllDead, None);
             return;
         }
         let starter = self
@@ -172,28 +172,27 @@ impl GameState {
             return Err(GameError::NotYourTurn);
         }
 
-        let (is_song, jokers) = match action {
+        let is_song = match action {
             Action::NewSeries { cards } => {
                 check_in_hand(&self.hands[player], &cards)?;
                 let s = build_series(player, cards.clone())?;
-                let jokers = cards.iter().filter(|p| p.card.is_joker()).count() as u8;
                 remove_cards(&mut self.hands[player], &cards);
                 self.table.push(s);
-                (true, jokers)
+                true
             }
             Action::Extend { series, cards } => {
                 check_in_hand(&self.hands[player], &cards)?;
                 let s = self.table.get_mut(series).ok_or(GameError::NoSuchSeries)?;
                 extend_series(s, cards.clone())?;
                 remove_cards(&mut self.hands[player], &cards);
-                (false, 0)
+                false
             }
         };
         self.played_any[player] = true;
 
         if self.hands[player].is_empty() {
             let outcome = if is_song { Outcome::Song } else { Outcome::Leng };
-            self.finish(outcome, Some(player), jokers);
+            self.finish(outcome, Some(player));
             return Ok(());
         }
 
@@ -206,7 +205,7 @@ impl GameState {
     fn settle_turn(&mut self) {
         loop {
             if !self.alive.iter().any(|&a| a) {
-                self.finish(Outcome::AllDead, None, 0);
+                self.finish(Outcome::AllDead, None);
                 return;
             }
             if !self.alive[self.turn] {
@@ -233,30 +232,19 @@ impl GameState {
         n
     }
 
-    fn finish(&mut self, outcome: Outcome, winner: Option<usize>, jokers: u8) {
+    fn finish(&mut self, outcome: Outcome, winner: Option<usize>) {
         let mut scores = [0i32; PLAYERS];
         for i in 0..PLAYERS {
-            let pts = hand_points(&self.hands[i]);
-            let dead = if self.played_any[i] {
-                pts.min(MAX_DEAD_SCORE)
-            } else {
-                OPENING_DEAD_SCORE
-            };
             scores[i] = if Some(i) == winner {
                 match outcome {
-                    Outcome::Song if jokers > 0 => -(jokers.min(4) as i32) * 25,
                     Outcome::Song => -100,
                     Outcome::Leng => -50,
                     Outcome::AllDead => 0,
                 }
-            } else if !self.alive[i] {
-                dead
+            } else if !self.played_any[i] {
+                OPENING_DEAD_SCORE
             } else {
-                match outcome {
-                    Outcome::Song => 100,
-                    Outcome::Leng => pts.min(MAX_DEAD_SCORE),
-                    Outcome::AllDead => dead,
-                }
+                hand_points(&self.hands[i]).min(MAX_DEAD_SCORE)
             };
         }
         self.phase = Phase::Over;
@@ -376,5 +364,42 @@ mod tests {
         let v = g.view_for(2);
         assert_eq!(v.hand, g.hands[2]);
         assert_eq!(v.hand_sizes, [4, 4, 4, 4, 4]);
+    }
+
+    #[test]
+    fn song_scores_leftover_cards_including_jokers() {
+        let mut g = GameState::from_hands(
+            [
+                vec![c(1, Hearts, 20), c(2, Hearts, 21), c(3, Hearts, 22),
+                    c(4, Spades, 23), c(5, Spades, 24), c(6, Spades, 25)],
+                vec![c(5, Hearts, 0), c(6, Hearts, 1), c(7, Hearts, 2), c(14, Joker, 26)],
+                vec![c(8, Clubs, 8), c(9, Clubs, 9), c(10, Clubs, 10), c(2, Spades, 11)],
+                vec![c(11, Diamonds, 12), c(12, Diamonds, 13), c(13, Diamonds, 14), c(2, Clubs, 15)],
+                vec![c(3, Spades, 16), c(4, Spades, 17), c(5, Spades, 18), c(6, Spades, 19)],
+            ],
+            vec![],
+            None,
+        );
+        let opens: [Vec<Placed>; PLAYERS] = [
+            vec![pl(c(1, Hearts, 20), 1), pl(c(2, Hearts, 21), 2), pl(c(3, Hearts, 22), 3)],
+            vec![pl(c(5, Hearts, 0), 5), pl(c(6, Hearts, 1), 6), pl(c(7, Hearts, 2), 7)],
+            vec![pl(c(8, Clubs, 8), 8), pl(c(9, Clubs, 9), 9), pl(c(10, Clubs, 10), 10)],
+            vec![pl(c(11, Diamonds, 12), 11), pl(c(12, Diamonds, 13), 12), pl(c(13, Diamonds, 14), 13)],
+            vec![pl(c(3, Spades, 16), 3), pl(c(4, Spades, 17), 4), pl(c(5, Spades, 18), 5)],
+        ];
+        for (i, cards) in opens.into_iter().enumerate() {
+            g.apply(i, Action::NewSeries { cards }).unwrap();
+        }
+        assert_eq!(g.turn, 0);
+
+        // pemain 0 menghabiskan kartu dengan seri baru = Song
+        g.apply(0, Action::NewSeries {
+            cards: vec![pl(c(4, Spades, 23), 4), pl(c(5, Spades, 24), 5), pl(c(6, Spades, 25), 6)],
+        })
+        .unwrap();
+
+        let r = g.result.unwrap();
+        assert_eq!(r.outcome, Outcome::Song);
+        assert_eq!(r.scores, [-100, 25, 5, 5, 5]); // joker di tangan = 25
     }
 }
