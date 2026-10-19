@@ -1,10 +1,11 @@
 import { useEffect, useRef, useState, useCallback } from 'react'
-import type { Card, PlayerView, ServerMsg } from './types'
+import type { Placed, PlayerView, ServerMsg } from './types'
 
 export function useGameSocket() {
   const [connected, setConnected] = useState(false)
   const [waiting, setWaiting] = useState<{ seat: number; joined: number } | null>(null)
   const [view, setView] = useState<PlayerView | null>(null)
+  const [totals, setTotals] = useState<number[]>([0, 0, 0, 0, 0])
   const [error, setError] = useState<string | null>(null)
   const wsRef = useRef<WebSocket | null>(null)
 
@@ -21,6 +22,7 @@ export function useGameSocket() {
         setWaiting({ seat: msg.seat, joined: msg.joined })
       } else if (msg.type === 'State') {
         setView(msg.view)
+        setTotals(msg.totals)
         setError(null)
       } else {
         setError(msg.message)
@@ -31,8 +33,12 @@ export function useGameSocket() {
   }, [])
 
   const send = (data: object) => wsRef.current?.send(JSON.stringify(data))
-  const play = useCallback((cards: Card[]) => send({ type: 'Play', cards }), [])
-  const pass = useCallback(() => send({ type: 'Pass' }), [])
+  const newSeries = useCallback((cards: Placed[]) => send({ type: 'NewSeries', cards }), [])
+  const extend = useCallback(
+    (series: number, cards: Placed[]) => send({ type: 'Extend', series, cards }),
+    [],
+  )
+  const nextRound = useCallback(() => send({ type: 'NextRound' }), [])
 
-  return { connected, waiting, view, error, play, pass }
+  return { connected, waiting, view, totals, error, newSeries, extend, nextRound }
 }

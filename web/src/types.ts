@@ -1,28 +1,47 @@
-export type Suit = 'Diamonds' | 'Clubs' | 'Hearts' | 'Spades'
+export type Suit = 'Diamonds' | 'Clubs' | 'Hearts' | 'Spades' | 'Joker'
 
+// rank: 1=A, 2..10, 11=J, 12=Q, 13=K, 14=Joker
 export interface Card {
-  rank: number // 3..10, 11=J, 12=Q, 13=K, 14=A, 15=2
+  rank: number
   suit: Suit
+  id: number
 }
 
-export interface Combo {
-  kind: 'Single' | 'Pair' | 'Triple'
-  cards: Card[]
+export interface Placed {
+  card: Card
+  pos: number // 1..14 (A bisa 1 atau 14)
+}
+
+export interface Series {
+  owner: number
+  suit: Suit
+  cards: Placed[]
+}
+
+export type Phase = 'Opening' | 'Playing' | 'Over'
+
+export interface RoundResult {
+  outcome: 'Song' | 'Leng' | 'AllDead'
+  winner: number | null
+  scores: number[]
 }
 
 export interface PlayerView {
   seat: number
   hand: Card[]
   hand_sizes: number[]
+  table: Series[]
+  alive: boolean[]
+  opened: boolean[]
+  my_pending: Placed[] | null
   turn: number
-  table: [number, Combo] | null
-  finished: number[]
-  over: boolean
+  phase: Phase
+  result: RoundResult | null
 }
 
 export type ServerMsg =
   | { type: 'Waiting'; seat: number; joined: number }
-  | { type: 'State'; view: PlayerView }
+  | { type: 'State'; view: PlayerView; totals: number[] }
   | { type: 'Error'; message: string }
 
 export const SUIT_SYMBOL: Record<Suit, string> = {
@@ -30,9 +49,11 @@ export const SUIT_SYMBOL: Record<Suit, string> = {
   Clubs: '♣',
   Hearts: '♥',
   Spades: '♠',
+  Joker: '★',
 }
 
-const RANK_LABEL: Record<number, string> = { 11: 'J', 12: 'Q', 13: 'K', 14: 'A', 15: '2' }
+export const isJoker = (c: Card) =>
+  c.suit === 'Joker' || (c.rank === 1 && c.suit === 'Spades')
 
-export const rankLabel = (r: number) => RANK_LABEL[r] ?? String(r)
-export const cardKey = (c: Card) => `${c.rank}-${c.suit}`
+const LABEL: Record<number, string> = { 1: 'A', 11: 'J', 12: 'Q', 13: 'K', 14: 'A' }
+export const posLabel = (pos: number) => LABEL[pos] ?? String(pos)
