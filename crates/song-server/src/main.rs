@@ -1,3 +1,4 @@
+use axum::http::{header, HeaderMap, StatusCode};
 use axum::{
     extract::{
         ws::{Message, WebSocket, WebSocketUpgrade},
@@ -76,17 +77,37 @@ async fn main() {
         .route("/ws", get(ws_handler))
         .with_state(rooms);
 
-    let listener = tokio::net::TcpListener::bind("0.0.0.0:3001").await.unwrap();
-    println!("Server jalan di http://localhost:3001");
+    let port = std::env::var("PORT").unwrap_or_else(|_| "3001".into());
+    let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{port}"))
+        .await
+        .unwrap();
+    println!("Server jalan di port {port}");
     axum::serve(listener, app).await.unwrap();
+}
+
+fn origin_ok(headers: &HeaderMap) -> bool {
+    // Kalau ALLOWED_ORIGINS tidak diisi (development), semua asal diizinkan.
+    let Ok(allowed) = std::env::var("ALLOWED_ORIGINS") else {
+        return true;
+    };
+    let origin = headers
+        .get(header::ORIGIN)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    allowed.split(',').any(|a| a.trim() == origin)
 }
 
 async fn ws_handler(
     ws: WebSocketUpgrade,
+    headers: HeaderMap,
     Query(q): Query<JoinQuery>,
     State(rooms): State<Rooms>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
+    if !origin_ok(&headers) {
+        return StatusCode::FORBIDDEN.into_response();
+    }
     ws.on_upgrade(move |socket| handle_socket(socket, rooms, q))
+        .into_response()
 }
 
 fn new_token() -> String {
@@ -196,7 +217,7 @@ async fn handle_socket(socket: WebSocket, rooms: Rooms, q: JoinQuery) {
             Ok((i, s.token.clone()))
         } else if r.game.is_some() {
             Err("Permainan di room ini sudah berjalan")
-                } else if let Some(i) = r.seats.iter().position(|s| s.is_none()) {
+        } else if let Some(i) = r.seats.iter().position(|s| s.is_none()) {
             let token = q
                 .token
                 .clone()
@@ -219,11 +240,23 @@ async fn handle_socket(socket: WebSocket, rooms: Rooms, q: JoinQuery) {
         }
     };
 
-    // task penulis: kirim apa pun dari channel ke socket
+    // task penulis: kirim pesan dari channel ke socket, plus ping berkala
+    // supaya koneksi yang diam tidak diputus oleh proxy
     let writer = tokio::spawn(async move {
-        while let Some(msg) = rx.recv().await {
-            if ws_tx.send(to_text(&msg)).await.is_err() {
-                break;
+        let mut ping = tokio::time::interval(Duration::from_secs(25));
+        loop {
+            tokio::select! {
+                msg = rx.recv() => {
+                    let Some(msg) = msg else { break };
+                    if ws_tx.send(to_text(&msg)).await.is_err() {
+                        break;
+                    }
+                }
+                _ = ping.tick() => {
+                    if ws_tx.send(Message::Ping(Vec::new())).await.is_err() {
+                        break;
+                    }
+                }
             }
         }
     });
@@ -261,7 +294,9 @@ async fn handle_socket(socket: WebSocket, rooms: Rooms, q: JoinQuery) {
             Ok(ClientMsg::Revive { set, dead, helper, series }) => {
                 apply(r, seat, Action::Revive { set, dead, helper, series })
             }
-            Ok(ClientMsg::AddDead { set, cards }) => apply(r, seat, Action::AddDead { set, cards }),
+            Ok(ClientMsg::AddDead { set, cards }) => {
+                apply(r, seat, Action::AddDead { set, cards })
+            }
         };
 
         match result {

@@ -38,8 +38,12 @@ export function useGameSocket({ room, name }: JoinParams) {
       }
       const qs = new URLSearchParams({ room, name, token })
 
-      const proto = location.protocol === 'https:' ? 'wss' : 'ws'
-      const ws = new WebSocket(`${proto}://${location.host}/ws?${qs}`)
+      // Production: VITE_WS_URL (mis. wss://song-xxx.fly.dev/ws).
+      // Development: kosong, pakai proxy Vite di host yang sama.
+      const base: string =
+        import.meta.env.VITE_WS_URL ??
+        `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws`
+      const ws = new WebSocket(`${base}?${qs}`)
       wsRef.current = ws
 
       ws.onopen = () => setConnected(true)
@@ -83,7 +87,11 @@ export function useGameSocket({ room, name }: JoinParams) {
     }
   }, [room, name])
 
-  const send = (data: object) => wsRef.current?.send(JSON.stringify(data))
+  const send = (data: object) => {
+    const ws = wsRef.current
+    if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(data))
+  }
+
   const newSeries = useCallback((cards: Placed[]) => send({ type: 'NewSeries', cards }), [])
   const extend = useCallback(
     (series: number, cards: Placed[]) => send({ type: 'Extend', series, cards }),
@@ -96,13 +104,13 @@ export function useGameSocket({ room, name }: JoinParams) {
       send({ type: 'Revive', set, dead, helper, series }),
     [],
   )
-    const addDead = useCallback(
+  const addDead = useCallback(
     (set: number, cards: Card[]) => send({ type: 'AddDead', set, cards }),
     [],
   )
-  return { 
-    
+
+  return {
     connected, waiting, view, totals, names, online, error, joinError,
-    newSeries, extend, nextRound,kill, revive, addDead
+    newSeries, extend, nextRound, kill, revive, addDead,
   }
 }
