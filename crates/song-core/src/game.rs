@@ -1,164 +1,285 @@
-use crate::{deal, Card, Combo, Suit, PLAYERS};
+use crate::series::*;
+use crate::{deal, Card, PLAYERS};
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 
-pub const THREE_DIAMONDS: Card = Card { rank: 3, suit: Suit::Diamonds };
+/// Skor maksimal untuk pemain yang mati setelah pernah menurunkan kartu.
+pub const MAX_DEAD_SCORE: i32 = 75;
+/// Skor untuk pemain yang mati di awal (tidak bisa membuka seri).
+pub const OPENING_DEAD_SCORE: i32 = 100;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Phase {
+    Opening, // semua pemain menurunkan seri pertama secara tersembunyi
+    Playing,
+    Over,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Action {
-    Play(Vec<Card>),
-    Pass,
+    NewSeries { cards: Vec<Placed> },
+    Extend { series: usize, cards: Vec<Placed> },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum GameError {
-    GameOver,
-    NotYourTurn,
-    InvalidCombo,
-    CardsNotInHand,
-    MustStartWith3D,
-    DoesNotBeat,
-    MustPlay, // tidak boleh pass saat memimpin
+pub enum Outcome {
+    Song,
+    Leng,
+    AllDead,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RoundResult {
+    pub outcome: Outcome,
+    pub winner: Option<usize>,
+    pub scores: [i32; PLAYERS],
 }
 
 #[derive(Debug, Clone)]
 pub struct GameState {
     pub hands: [Vec<Card>; PLAYERS],
+    pub dead_cards: Vec<Card>,
+    pub phase: Phase,
+    pub table: Vec<Series>,
+    pending: [Option<Vec<Placed>>; PLAYERS], // seri pembuka yang belum dibuka
+    pub alive: [bool; PLAYERS],
+    played_any: [bool; PLAYERS],
     pub turn: usize,
-    /// (pemain yang terakhir membuang, kombinasinya). None = pemain bebas memimpin.
-    pub table: Option<(usize, Combo)>,
-    pub first_move: bool,
-    /// urutan pemain yang kartunya habis (peringkat 1, 2, ...)
-    pub finished: Vec<usize>,
-    pub over: bool,
+    forced_starter: Option<usize>,
+    pub result: Option<RoundResult>,
 }
 
-/// Tampilan state untuk SATU pemain: kartu lawan disembunyikan.
+/// Tampilan untuk SATU pemain: kartu lawan dan seri pembuka yang belum dibuka disembunyikan.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PlayerView {
     pub seat: usize,
     pub hand: Vec<Card>,
     pub hand_sizes: [usize; PLAYERS],
+    pub table: Vec<Series>,
+    pub alive: [bool; PLAYERS],
+    pub opened: [bool; PLAYERS],
     pub turn: usize,
-    pub table: Option<(usize, Combo)>,
-    pub finished: Vec<usize>,
-    pub over: bool,
+    pub phase: Phase,
+    pub result: Option<RoundResult>,
+}
+
+fn remove_cards(hand: &mut Vec<Card>, cards: &[Placed]) {
+    hand.retain(|c| !cards.iter().any(|p| p.card.id == c.id));
+}
+
+fn hand_points(hand: &[Card]) -> i32 {
+    hand.iter().map(|c| c.points()).sum()
 }
 
 impl GameState {
-    pub fn new(rng: &mut impl Rng) -> Self {
-        Self::from_hands(deal(rng))
+    /// starter = None: ditentukan dari seri pembuka terendah (ronde pertama).
+    /// starter = Some(kursi): dipakai di ronde berikutnya.
+    pub fn new(rng: &mut impl Rng, starter: Option<usize>) -> Self {
+        let d = deal(rng);
+        Self::from_hands(d.hands, d.dead, starter)
     }
 
-    pub fn from_hands(hands: [Vec<Card>; PLAYERS]) -> Self {
-        let starter = hands.iter().position(|h| h.contains(&THREE_DIAMONDS));
-        GameState {
+    pub fn from_hands(
+        hands: [Vec<Card>; PLAYERS],
+        dead_cards: Vec<Card>,
+        forced_starter: Option<usize>,
+    ) -> Self {
+        let mut g = GameState {
             hands,
-            turn: starter.unwrap_or(0),
-            table: None,
-            first_move: starter.is_some(),
-            finished: Vec::new(),
-            over: false,
+            dead_cards,
+            phase: Phase::Opening,
+            table: Vec::new(),
+            pending: Default::default(),
+            alive: [true; PLAYERS],
+            played_any: [false; PLAYERS],
+            turn: 0,
+            forced_starter,
+            result: None,
+        };
+        // yang tidak bisa membuka seri langsung mati di awal
+        for i in 0..PLAYERS {
+            if !can_open(&g.hands[i]) {
+                g.alive[i] = false;
+            }
         }
+        g.check_opening_done();
+        g
     }
 
     pub fn apply(&mut self, player: usize, action: Action) -> Result<(), GameError> {
-        if self.over {
-            return Err(GameError::GameOver);
+        match self.phase {
+            Phase::Over => Err(GameError::GameOver),
+            Phase::Opening => self.apply_opening(player, action),
+            Phase::Playing => self.apply_playing(player, action),
         }
+    }
+
+    fn apply_opening(&mut self, player: usize, action: Action) -> Result<(), GameError> {
+        let Action::NewSeries { cards } = action else {
+            return Err(GameError::WrongPhase);
+        };
+        if !self.alive[player] {
+            return Err(GameError::NotAlive);
+        }
+        if self.pending[player].is_some() {
+            return Err(GameError::AlreadyOpened);
+        }
+        check_in_hand(&self.hands[player], &cards)?;
+        build_series(player, cards.clone())?;
+
+        remove_cards(&mut self.hands[player], &cards);
+        self.pending[player] = Some(cards);
+        self.check_opening_done();
+        Ok(())
+    }
+
+    /// Kalau semua pemain hidup sudah menurunkan seri pembuka: buka serentak.
+    fn check_opening_done(&mut self) {
+        if self.phase != Phase::Opening {
+            return;
+        }
+        if !(0..PLAYERS).all(|i| !self.alive[i] || self.pending[i].is_some()) {
+            return;
+        }
+        for i in 0..PLAYERS {
+            if let Some(cards) = self.pending[i].take() {
+                let s = build_series(i, cards).expect("sudah divalidasi saat dikirim");
+                self.table.push(s);
+                self.played_any[i] = true;
+            }
+        }
+        if self.table.is_empty() {
+            self.finish(Outcome::AllDead, None, 0);
+            return;
+        }
+        let starter = self
+            .forced_starter
+            .filter(|&s| self.alive[s])
+            .unwrap_or_else(|| {
+                self.table
+                    .iter()
+                    .min_by_key(|s| (s.lo(), s.owner))
+                    .unwrap()
+                    .owner
+            });
+        self.phase = Phase::Playing;
+        self.turn = starter;
+        self.settle_turn();
+    }
+
+    fn apply_playing(&mut self, player: usize, action: Action) -> Result<(), GameError> {
         if player != self.turn {
             return Err(GameError::NotYourTurn);
         }
-        match action {
-            Action::Play(cards) => self.play(player, cards),
-            Action::Pass => self.pass(player),
-        }
-    }
 
-    fn play(&mut self, player: usize, cards: Vec<Card>) -> Result<(), GameError> {
-        let combo = Combo::from_cards(&cards).ok_or(GameError::InvalidCombo)?;
-
-        if !combo.cards.iter().all(|c| self.hands[player].contains(c)) {
-            return Err(GameError::CardsNotInHand);
-        }
-        if self.first_move && !combo.cards.contains(&THREE_DIAMONDS) {
-            return Err(GameError::MustStartWith3D);
-        }
-        if let Some((_, last)) = &self.table {
-            if !combo.beats(last) {
-                return Err(GameError::DoesNotBeat);
+        let (is_song, jokers) = match action {
+            Action::NewSeries { cards } => {
+                check_in_hand(&self.hands[player], &cards)?;
+                let s = build_series(player, cards.clone())?;
+                let jokers = cards.iter().filter(|p| p.card.is_joker()).count() as u8;
+                remove_cards(&mut self.hands[player], &cards);
+                self.table.push(s);
+                (true, jokers)
             }
-        }
-
-        self.hands[player].retain(|c| !combo.cards.contains(c));
-        self.first_move = false;
-        self.table = Some((player, combo));
+            Action::Extend { series, cards } => {
+                check_in_hand(&self.hands[player], &cards)?;
+                let s = self.table.get_mut(series).ok_or(GameError::NoSuchSeries)?;
+                extend_series(s, cards.clone())?;
+                remove_cards(&mut self.hands[player], &cards);
+                (false, 0)
+            }
+        };
+        self.played_any[player] = true;
 
         if self.hands[player].is_empty() {
-            self.finished.push(player);
-        }
-
-        let active: Vec<usize> = (0..PLAYERS).filter(|&i| !self.hands[i].is_empty()).collect();
-        if active.len() <= 1 {
-            if let Some(&last) = active.first() {
-                self.finished.push(last);
-            }
-            self.over = true;
+            let outcome = if is_song { Outcome::Song } else { Outcome::Leng };
+            self.finish(outcome, Some(player), jokers);
             return Ok(());
         }
 
-        self.turn = self.next_active(player);
+        self.turn = self.next_alive(player);
+        self.settle_turn();
         Ok(())
     }
 
-    fn pass(&mut self, player: usize) -> Result<(), GameError> {
-        let leader = match &self.table {
-            Some((leader, _)) => *leader,
-            None => return Err(GameError::MustPlay),
-        };
-
-        // cari pemain berikutnya; kalau kembali ke leader, putaran selesai
-        let mut n = (player + 1) % PLAYERS;
+    /// Pastikan pemain yang gilirannya punya langkah; kalau tidak, dia mati otomatis.
+    fn settle_turn(&mut self) {
         loop {
-            if n == leader {
-                self.table = None;
-                self.turn = if self.hands[leader].is_empty() {
-                    self.next_active(leader)
-                } else {
-                    leader
-                };
-                break;
+            if !self.alive.iter().any(|&a| a) {
+                self.finish(Outcome::AllDead, None, 0);
+                return;
             }
-            if !self.hands[n].is_empty() {
-                self.turn = n;
-                break;
+            if !self.alive[self.turn] {
+                self.turn = self.next_alive(self.turn);
+                continue;
             }
-            n = (n + 1) % PLAYERS;
+            if self.has_move(self.turn) {
+                return;
+            }
+            self.alive[self.turn] = false;
         }
-        Ok(())
     }
 
-    fn next_active(&self, from: usize) -> usize {
+    fn has_move(&self, p: usize) -> bool {
+        can_extend(&self.hands[p], &self.table) || can_open(&self.hands[p])
+    }
+
+    /// Hanya dipanggil kalau minimal satu pemain masih hidup.
+    fn next_alive(&self, from: usize) -> usize {
         let mut n = (from + 1) % PLAYERS;
-        while self.hands[n].is_empty() {
+        while !self.alive[n] {
             n = (n + 1) % PLAYERS;
         }
         n
     }
 
+    fn finish(&mut self, outcome: Outcome, winner: Option<usize>, jokers: u8) {
+        let mut scores = [0i32; PLAYERS];
+        for i in 0..PLAYERS {
+            let pts = hand_points(&self.hands[i]);
+            let dead = if self.played_any[i] {
+                pts.min(MAX_DEAD_SCORE)
+            } else {
+                OPENING_DEAD_SCORE
+            };
+            scores[i] = if Some(i) == winner {
+                match outcome {
+                    Outcome::Song if jokers > 0 => -(jokers.min(4) as i32) * 25,
+                    Outcome::Song => -100,
+                    Outcome::Leng => -50,
+                    Outcome::AllDead => 0,
+                }
+            } else if !self.alive[i] {
+                dead
+            } else {
+                match outcome {
+                    Outcome::Song => 100,
+                    Outcome::Leng => pts.min(MAX_DEAD_SCORE),
+                    Outcome::AllDead => dead,
+                }
+            };
+        }
+        self.phase = Phase::Over;
+        self.result = Some(RoundResult { outcome, winner, scores });
+    }
+
     pub fn view_for(&self, seat: usize) -> PlayerView {
         let mut hand_sizes = [0; PLAYERS];
-        for (i, h) in self.hands.iter().enumerate() {
-            hand_sizes[i] = h.len();
+        let mut opened = [false; PLAYERS];
+        for i in 0..PLAYERS {
+            hand_sizes[i] = self.hands[i].len();
+            opened[i] = self.pending[i].is_some() || self.played_any[i];
         }
         PlayerView {
             seat,
             hand: self.hands[seat].clone(),
             hand_sizes,
-            turn: self.turn,
             table: self.table.clone(),
-            finished: self.finished.clone(),
-            over: self.over,
+            alive: self.alive,
+            opened,
+            turn: self.turn,
+            phase: self.phase,
+            result: self.result.clone(),
         }
     }
 }
@@ -167,95 +288,86 @@ impl GameState {
 mod tests {
     use super::*;
     use crate::Suit::*;
+    use crate::Suit;
 
-    fn c(rank: u8, suit: Suit) -> Card {
-        Card { rank, suit }
+    fn c(rank: u8, suit: Suit, id: u8) -> Card {
+        Card { rank, suit, id }
+    }
+    fn pl(card: Card, pos: u8) -> Placed {
+        Placed { card, pos }
     }
 
     fn sample() -> GameState {
-        GameState::from_hands([
-            vec![c(3, Diamonds), c(9, Clubs)],
-            vec![c(4, Diamonds), c(10, Clubs)],
-            vec![c(5, Diamonds), c(11, Clubs)],
-            vec![c(6, Diamonds), c(12, Clubs)],
-            vec![c(7, Diamonds), c(13, Clubs)],
-        ])
+        GameState::from_hands(
+            [
+                vec![c(5, Hearts, 0), c(6, Hearts, 1), c(7, Hearts, 2), c(9, Spades, 3)],
+                vec![c(1, Diamonds, 4), c(2, Diamonds, 5), c(3, Diamonds, 6), c(4, Diamonds, 7)],
+                vec![c(8, Clubs, 8), c(9, Clubs, 9), c(10, Clubs, 10), c(2, Spades, 11)],
+                vec![c(11, Diamonds, 12), c(12, Diamonds, 13), c(13, Diamonds, 14), c(2, Clubs, 15)],
+                vec![c(3, Spades, 16), c(4, Spades, 17), c(5, Spades, 18), c(6, Spades, 19)],
+            ],
+            vec![],
+            None,
+        )
+    }
+
+    fn open_all(g: &mut GameState) {
+        let opens: [Vec<Placed>; PLAYERS] = [
+            vec![pl(c(5, Hearts, 0), 5), pl(c(6, Hearts, 1), 6), pl(c(7, Hearts, 2), 7)],
+            vec![pl(c(1, Diamonds, 4), 1), pl(c(2, Diamonds, 5), 2), pl(c(3, Diamonds, 6), 3)],
+            vec![pl(c(8, Clubs, 8), 8), pl(c(9, Clubs, 9), 9), pl(c(10, Clubs, 10), 10)],
+            vec![pl(c(11, Diamonds, 12), 11), pl(c(12, Diamonds, 13), 12), pl(c(13, Diamonds, 14), 13)],
+            vec![pl(c(3, Spades, 16), 3), pl(c(4, Spades, 17), 4), pl(c(5, Spades, 18), 5)],
+        ];
+        for (i, cards) in opens.into_iter().enumerate() {
+            g.apply(i, Action::NewSeries { cards }).unwrap();
+        }
     }
 
     #[test]
-    fn new_game_is_valid() {
-        let g = GameState::new(&mut rand::thread_rng());
-        assert!(g.hands.iter().all(|h| h.len() == 10));
-        assert!(g.hands[g.turn].contains(&THREE_DIAMONDS));
+    fn new_random_game_starts_in_opening() {
+        let g = GameState::new(&mut rand::thread_rng(), None);
+        assert!(g.hands.iter().all(|h| h.len() == 20));
+        assert_eq!(g.dead_cards.len(), 8);
     }
 
     #[test]
-    fn first_move_must_contain_3d() {
+    fn lowest_opening_series_goes_first() {
         let mut g = sample();
+        assert_eq!(g.phase, Phase::Opening);
+        open_all(&mut g);
+        assert_eq!(g.phase, Phase::Playing);
+        assert_eq!(g.table.len(), 5);
+        assert_eq!(g.turn, 1); // A-2-3 paling rendah
+    }
+
+    #[test]
+    fn opening_cannot_be_repeated_or_played_out_of_turn() {
+        let mut g = sample();
+        let cards = vec![pl(c(5, Hearts, 0), 5), pl(c(6, Hearts, 1), 6), pl(c(7, Hearts, 2), 7)];
+        g.apply(0, Action::NewSeries { cards: cards.clone() }).unwrap();
+        assert_eq!(g.apply(0, Action::NewSeries { cards }), Err(GameError::AlreadyOpened));
         assert_eq!(
-            g.apply(0, Action::Play(vec![c(9, Clubs)])),
-            Err(GameError::MustStartWith3D)
+            g.apply(1, Action::Extend { series: 0, cards: vec![] }),
+            Err(GameError::WrongPhase)
         );
-        assert_eq!(g.apply(0, Action::Play(vec![c(3, Diamonds)])), Ok(()));
-        assert_eq!(g.turn, 1);
     }
 
     #[test]
-    fn cannot_play_out_of_turn_or_unowned_cards() {
+    fn emptying_hand_by_extending_is_leng() {
         let mut g = sample();
+        open_all(&mut g);
         assert_eq!(
-            g.apply(1, Action::Play(vec![c(4, Diamonds)])),
+            g.apply(0, Action::Extend { series: 1, cards: vec![pl(c(9, Spades, 3), 9)] }),
             Err(GameError::NotYourTurn)
         );
-        assert_eq!(
-            g.apply(0, Action::Play(vec![c(14, Spades)])),
-            Err(GameError::CardsNotInHand)
-        );
-    }
-
-    #[test]
-    fn cannot_pass_when_leading() {
-        let mut g = sample();
-        assert_eq!(g.apply(0, Action::Pass), Err(GameError::MustPlay));
-    }
-
-    #[test]
-    fn must_beat_the_table() {
-        let mut g = sample();
-        g.apply(0, Action::Play(vec![c(3, Diamonds)])).unwrap();
-        g.apply(1, Action::Play(vec![c(10, Clubs)])).unwrap();
-        assert_eq!(
-            g.apply(2, Action::Play(vec![c(5, Diamonds)])),
-            Err(GameError::DoesNotBeat)
-        );
-    }
-
-    #[test]
-    fn round_resets_after_everyone_passes() {
-        let mut g = sample();
-        g.apply(0, Action::Play(vec![c(3, Diamonds)])).unwrap();
-        for p in 1..PLAYERS {
-            g.apply(p, Action::Pass).unwrap();
-        }
-        assert!(g.table.is_none());
-        assert_eq!(g.turn, 0); // yang terakhir membuang memimpin lagi
-    }
-
-    #[test]
-    fn game_ends_when_one_player_left() {
-        let mut g = GameState::from_hands([
-            vec![c(3, Diamonds)],
-            vec![c(4, Diamonds)],
-            vec![c(5, Diamonds)],
-            vec![c(6, Diamonds)],
-            vec![c(7, Diamonds)],
-        ]);
-        g.apply(0, Action::Play(vec![c(3, Diamonds)])).unwrap();
-        g.apply(1, Action::Play(vec![c(4, Diamonds)])).unwrap();
-        g.apply(2, Action::Play(vec![c(5, Diamonds)])).unwrap();
-        g.apply(3, Action::Play(vec![c(6, Diamonds)])).unwrap();
-        assert!(g.over);
-        assert_eq!(g.finished, vec![0, 1, 2, 3, 4]);
+        g.apply(1, Action::Extend { series: 1, cards: vec![pl(c(4, Diamonds, 7), 4)] })
+            .unwrap();
+        assert_eq!(g.phase, Phase::Over);
+        let r = g.result.unwrap();
+        assert_eq!(r.outcome, Outcome::Leng);
+        assert_eq!(r.winner, Some(1));
+        assert_eq!(r.scores[1], -50);
     }
 
     #[test]
@@ -263,6 +375,6 @@ mod tests {
         let g = sample();
         let v = g.view_for(2);
         assert_eq!(v.hand, g.hands[2]);
-        assert_eq!(v.hand_sizes, [2, 2, 2, 2, 2]);
+        assert_eq!(v.hand_sizes, [4, 4, 4, 4, 4]);
     }
 }
