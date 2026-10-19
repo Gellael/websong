@@ -9,7 +9,7 @@ import {
   reviveOptions,
   type Option,
 } from './series'
-import type { Phase } from './types'
+import { posLabel, type Phase } from './types'
 
 const OUTCOME = { Song: 'SONG!', Leng: 'LENG!', AllDead: 'Semua pemain mati' } as const
 const COLORS = ['#ff6b6b', '#4dabf7', '#ffd43b', '#69db7c', '#da77f2']
@@ -148,18 +148,17 @@ export default function Game({ room, name: myName, onLeave }: Props) {
         })}
       </div>
 
-      <div className={`status ${myTurn || canOpen ? 'mine' : ''}`}>{status}</div>
-
       <div className="table">
         {view.table.length === 0 ? (
           <p className="empty">{phase === 'Opening' ? 'Seri pembuka belum dibuka' : 'Meja kosong'}</p>
         ) : (
           view.table.map((s, idx) => (
-            <div key={idx} className="series">
-              <div className="badge" style={{ background: COLORS[s.owner] }}>
-                #{idx + 1} · {nm(s.owner)}
+            <div key={idx} className="lane" style={{ ['--c' as string]: COLORS[s.owner] }}>
+              <div className="lane-label">
+                <b>#{idx + 1}</b>
+                <span>{nm(s.owner)}</span>
               </div>
-              <div className="row">
+              <div className="lane-cards">
                 {s.cards.map((p) => (
                   <CardView key={p.card.id} card={p.card} pos={p.pos} small />
                 ))}
@@ -168,6 +167,25 @@ export default function Game({ room, name: myName, onLeave }: Props) {
           ))
         )}
       </div>
+
+      {view.sets.length > 0 && (
+        <div className="graveyard">
+          <div className="gtitle">☠ Kartu mati</div>
+          {view.sets.map((d, i) => (
+            <div key={i} className="lane dark">
+              <div className="lane-label">
+                <b>{posLabel(d.rank)}</b>
+                <span>set #{i + 1}</span>
+              </div>
+              <div className="lane-cards">
+                {d.cards.map((c) => (
+                  <CardView key={c.id} card={c} small />
+                ))}
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
 
       {view.sets.length > 0 && (
         <div className="graveyard">
