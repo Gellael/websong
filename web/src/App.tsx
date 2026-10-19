@@ -59,7 +59,7 @@ export default function App() {
   const ready = name.trim().length > 0
 
   return (
-    <div className="landing">
+    <div className="screen center landing">
       <div className="fan" aria-hidden>
         <div className="fcard c1"><b>A</b><span>♠</span></div>
         <div className="fcard c2 red"><b>K</b><span>♥</span></div>

@@ -13,8 +13,7 @@ export function CardView({ card, pos, selected, small, onClick }: Props) {
   const realJoker = card.suit === 'Joker'
   const red = card.suit === 'Diamonds' || card.suit === 'Hearts'
   const label = pos !== undefined ? posLabel(pos) : realJoker ? 'JKR' : posLabel(card.rank)
-  const suit = realJoker ? '★' : SUIT_SYMBOL[card.suit]
-  const pip = realJoker || (joker && pos !== undefined) ? '★' : suit
+  const pip = realJoker || (joker && pos !== undefined) ? '★' : SUIT_SYMBOL[card.suit]
 
   return (
     <button
@@ -27,6 +26,14 @@ export function CardView({ card, pos, selected, small, onClick }: Props) {
         <i>{pip}</i>
       </span>
       <span className="pip">{pip}</span>
+      <span className="corner br">
+        <b>{label}</b>
+        <i>{pip}</i>
+      </span>
     </button>
   )
+}
+
+export function CardBack({ small }: { small?: boolean }) {
+  return <span className={`card back ${small ? 'small' : ''}`} />
 }
