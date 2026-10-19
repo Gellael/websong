@@ -19,6 +19,9 @@ pub enum Phase {
 pub enum Action {
     NewSeries { cards: Vec<Placed> },
     Extend { series: usize, cards: Vec<Placed> },
+    Kill { cards: Vec<Card> },
+    Revive { set: usize, dead: Placed, helper: Placed, series: usize },
+    AddDead { set: usize, cards: Vec<Card> },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -41,6 +44,7 @@ pub struct GameState {
     pub dead_cards: Vec<Card>,
     pub phase: Phase,
     pub table: Vec<Series>,
+    pub sets: Vec<DeadSet>,
     pending: [Option<Vec<Placed>>; PLAYERS], // seri pembuka yang belum dibuka
     pub alive: [bool; PLAYERS],
     played_any: [bool; PLAYERS],
@@ -56,6 +60,7 @@ pub struct PlayerView {
     pub hand: Vec<Card>,
     pub hand_sizes: [usize; PLAYERS],
     pub table: Vec<Series>,
+    pub sets: Vec<DeadSet>,
     pub alive: [bool; PLAYERS],
     pub opened: [bool; PLAYERS],
     pub my_pending: Option<Vec<Placed>>,
@@ -90,6 +95,7 @@ impl GameState {
             dead_cards,
             phase: Phase::Opening,
             table: Vec::new(),
+            sets: Vec::new(),
             pending: Default::default(),
             alive: [true; PLAYERS],
             played_any: [false; PLAYERS],
@@ -188,6 +194,42 @@ impl GameState {
                 remove_cards(&mut self.hands[player], &cards);
                 false
             }
+            Action::Kill { cards } => {
+                let wrapped: Vec<Placed> =
+                    cards.iter().map(|&card| Placed { card, pos: 0 }).collect();
+                check_in_hand(&self.hands[player], &wrapped)?;
+                let set = build_dead_set(player, &cards)?;
+                self.hands[player].retain(|c| !cards.iter().any(|k| k.id == c.id));
+                self.sets.push(set);
+                false
+            }
+                        Action::AddDead { set, cards } => {
+                let wrapped: Vec<Placed> =
+                    cards.iter().map(|&card| Placed { card, pos: 0 }).collect();
+                check_in_hand(&self.hands[player], &wrapped)?;
+                let ds = self.sets.get_mut(set).ok_or(GameError::NoSuchSet)?;
+                add_to_dead_set(ds, &cards)?;
+                self.hands[player].retain(|c| !cards.iter().any(|k| k.id == c.id));
+                false
+            }
+            Action::Revive { set, dead, helper, series } => {
+                check_in_hand(&self.hands[player], &[helper])?;
+                let mut ds = self.sets.get(set).ok_or(GameError::NoSuchSet)?.clone();
+                if REVIVE_OWN_SETS_ONLY && ds.owner != player {
+                    return Err(GameError::NotYourSet);
+                }
+                let mut sr = self.table.get(series).ok_or(GameError::NoSuchSeries)?.clone();
+                revive(&mut ds, &mut sr, dead, helper)?;
+
+                remove_cards(&mut self.hands[player], &[helper]);
+                self.table[series] = sr;
+                if ds.cards.is_empty() {
+                    self.sets.remove(set);
+                } else {
+                    self.sets[set] = ds;
+                }
+                false
+            }
         };
         self.played_any[player] = true;
 
@@ -221,7 +263,12 @@ impl GameState {
     }
 
     fn has_move(&self, p: usize) -> bool {
-        can_extend(&self.hands[p], &self.table) || can_open(&self.hands[p])
+        let h = &self.hands[p];
+        can_extend(h, &self.table)
+            || can_open(h)
+            || can_kill(h)
+            || can_add_dead(h, &self.sets)
+            || can_revive(p, h, &self.sets, &self.table)
     }
 
     /// Hanya dipanggil kalau minimal satu pemain masih hidup.
@@ -264,6 +311,7 @@ impl GameState {
             hand: self.hands[seat].clone(),
             hand_sizes,
             table: self.table.clone(),
+            sets: self.sets.clone(),
             alive: self.alive,
             opened,
             my_pending: self.pending[seat].clone(),
@@ -280,6 +328,90 @@ mod tests {
     use crate::Suit::*;
     use crate::Suit;
 
+        fn opened_game(p0_extra: Vec<Card>) -> GameState {
+        let mut p0 = vec![c(1, Hearts, 20), c(2, Hearts, 21), c(3, Hearts, 22)];
+        p0.extend(p0_extra);
+        let mut g = GameState::from_hands(
+            [
+                p0,
+                vec![c(5, Hearts, 0), c(6, Hearts, 1), c(7, Hearts, 2), c(14, Joker, 26)],
+                vec![c(8, Clubs, 8), c(9, Clubs, 9), c(10, Clubs, 10), c(2, Spades, 11)],
+                vec![c(11, Diamonds, 12), c(12, Diamonds, 13), c(13, Diamonds, 14), c(2, Clubs, 15)],
+                vec![c(3, Spades, 16), c(4, Spades, 17), c(5, Spades, 18), c(6, Spades, 19)],
+            ],
+            vec![],
+            None,
+        );
+        let opens: [Vec<Placed>; PLAYERS] = [
+            vec![pl(c(1, Hearts, 20), 1), pl(c(2, Hearts, 21), 2), pl(c(3, Hearts, 22), 3)],
+            vec![pl(c(5, Hearts, 0), 5), pl(c(6, Hearts, 1), 6), pl(c(7, Hearts, 2), 7)],
+            vec![pl(c(8, Clubs, 8), 8), pl(c(9, Clubs, 9), 9), pl(c(10, Clubs, 10), 10)],
+            vec![pl(c(11, Diamonds, 12), 11), pl(c(12, Diamonds, 13), 12), pl(c(13, Diamonds, 14), 13)],
+            vec![pl(c(3, Spades, 16), 3), pl(c(4, Spades, 17), 4), pl(c(5, Spades, 18), 5)],
+        ];
+        for (i, cards) in opens.into_iter().enumerate() {
+            g.apply(i, Action::NewSeries { cards }).unwrap();
+        }
+        g
+    }
+
+    #[test]
+    fn kill_removes_cards_from_hand() {
+        let mut g = opened_game(vec![
+            c(9, Clubs, 30), c(9, Spades, 31), c(9, Diamonds, 32), c(13, Clubs, 33),
+        ]);
+        assert_eq!(g.turn, 0);
+
+        // angka tidak sama -> ditolak, tidak ada yang berubah
+        assert_eq!(
+            g.apply(0, Action::Kill { cards: vec![c(9, Clubs, 30), c(9, Spades, 31), c(13, Clubs, 33)] }),
+            Err(GameError::BadSet)
+        );
+        assert_eq!(g.hands[0].len(), 4);
+
+        g.apply(0, Action::Kill { cards: vec![c(9, Clubs, 30), c(9, Spades, 31), c(9, Diamonds, 32)] })
+            .unwrap();
+        assert_eq!(g.hands[0].len(), 1);
+        assert_eq!(g.sets.len(), 1);
+        assert_eq!(g.turn, 1);
+    }
+
+    #[test]
+    fn revive_extends_series_and_can_win_with_leng() {
+        let mut g = opened_game(vec![c(4, Hearts, 43)]);
+        g.sets.push(DeadSet {
+            owner: 0,
+            rank: 5,
+            cards: vec![c(5, Hearts, 40), c(5, Hearts, 41), c(5, Clubs, 42)],
+        });
+
+        // jenis kartu mati tidak cocok dengan seri ♥
+        assert_eq!(
+            g.apply(0, Action::Revive {
+                set: 0,
+                dead: pl(c(5, Clubs, 42), 5),
+                helper: pl(c(4, Hearts, 43), 4),
+                series: 0,
+            }),
+            Err(GameError::SuitMismatch)
+        );
+        assert_eq!(g.sets[0].cards.len(), 3);
+
+        g.apply(0, Action::Revive {
+            set: 0,
+            dead: pl(c(5, Hearts, 40), 5),
+            helper: pl(c(4, Hearts, 43), 4),
+            series: 0,
+        })
+        .unwrap();
+        assert_eq!(g.table[0].hi(), 5);
+        assert_eq!(g.sets[0].cards.len(), 2);
+
+        // kartu di tangan habis lewat menyambung = Leng
+        let r = g.result.unwrap();
+        assert_eq!(r.outcome, Outcome::Leng);
+        assert_eq!(r.winner, Some(0));
+    }
     fn c(rank: u8, suit: Suit, id: u8) -> Card {
         Card { rank, suit, id }
     }

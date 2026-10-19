@@ -22,3 +22,11 @@
 .result table { border-collapse: collapse; margin: 8px 0 16px; }
 .result td, .result th { border: 1px solid #ccc; padding: 6px 14px; text-align: center; }
 .result tr.me { font-weight: bold; }
+.lobby { max-width: 360px; }
+.lobby label { display: block; margin: 12px 0; }
+.lobby input { display: block; width: 100%; padding: 8px; font-size: 16px; box-sizing: border-box; }
+.topbar { display: flex; align-items: center; gap: 16px; }
+.topbar h1 { margin-right: auto; }
+.code { font-family: monospace; font-size: 1.2em; letter-spacing: 2px; }
+.banner { background: #fff3cd; border: 1px solid #e0c36a; padding: 8px 12px; border-radius: 6px; }
+.deadsets { background: #3b3b3b; color: #fff; padding: 8px 12px; border-radius: 12px; margin-bottom: 12px; }

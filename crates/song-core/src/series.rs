@@ -18,6 +18,10 @@ pub enum GameError {
     NeedNatural,
     NoSuchSeries,
     CannotAttach,
+    BadSet,
+    NoSuchSet,
+    DeadCardNotInSet,
+    NotYourSet,
 }
 
 /// Kartu beserta posisinya di dalam seri (1..=14, A bisa 1 atau 14).
@@ -180,11 +184,175 @@ pub fn can_extend(hand: &[Card], table: &[Series]) -> bool {
     })
 }
 
+/// true = hanya pemilik set yang boleh menghidupkan kartu dari set itu.
+pub const REVIVE_OWN_SETS_ONLY: bool = false;
+
+/// Kartu mati: 3..=5 kartu seangka (jenis bebas) yang sudah diturunkan.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeadSet {
+    pub owner: usize,
+    pub rank: u8,
+    pub cards: Vec<Card>,
+}
+
+pub fn build_dead_set(owner: usize, cards: &[Card]) -> Result<DeadSet, GameError> {
+    if !(3..=5).contains(&cards.len()) {
+        return Err(GameError::BadSize);
+    }
+    let mut rank: Option<u8> = None;
+    for c in cards.iter().filter(|c| !c.is_joker()) {
+        match rank {
+            None => rank = Some(c.rank),
+            Some(r) if r != c.rank => return Err(GameError::BadSet),
+            _ => {}
+        }
+    }
+    let rank = rank.ok_or(GameError::NeedNatural)?;
+    Ok(DeadSet { owner, rank, cards: cards.to_vec() })
+}
+
+/// Hidupkan satu kartu mati + satu kartu sambung (dari tangan) ke ujung seri.
+/// Set dan seri hanya diubah kalau semuanya valid.
+pub fn revive(
+    set: &mut DeadSet,
+    series: &mut Series,
+    dead: Placed,
+    helper: Placed,
+) -> Result<(), GameError> {
+    if !set.cards.contains(&dead.card) {
+        return Err(GameError::DeadCardNotInSet);
+    }
+    if dead.card.id == helper.card.id {
+        return Err(GameError::DuplicateCard);
+    }
+    let mut trial = series.clone();
+    extend_series(&mut trial, vec![dead, helper])?;
+    *series = trial;
+    set.cards.retain(|c| c.id != dead.card.id);
+    Ok(())
+}
+
+fn fits(card: &Card, suit: Suit, pos: u8) -> bool {
+    card.is_joker() || (card.suit == suit && (card.rank == pos || (card.rank == 1 && pos == 14)))
+}
+
+/// Apakah tangan punya 3+ kartu seangka (joker boleh mengisi, minimal 1 kartu asli)?
+pub fn can_kill(hand: &[Card]) -> bool {
+    let jokers = hand.iter().filter(|c| c.is_joker()).count();
+    (1..=13u8).any(|rank| {
+        let n = hand.iter().filter(|c| !c.is_joker() && c.rank == rank).count();
+        n >= 1 && n + jokers >= 3
+    })
+}
+
+/// Apakah ada pasangan (kartu mati + kartu tangan) yang bisa menyambung seri di meja?
+pub fn can_revive(me: usize, hand: &[Card], sets: &[DeadSet], table: &[Series]) -> bool {
+    for s in table {
+        let (lo, hi) = (s.lo(), s.hi());
+        let mut pairs = Vec::new();
+        if lo >= 3 {
+            pairs.push((lo - 2, lo - 1));
+        }
+        if lo >= 2 && hi <= 13 {
+            pairs.push((lo - 1, hi + 1));
+        }
+        if hi <= 12 {
+            pairs.push((hi + 1, hi + 2));
+        }
+        for (a, b) in pairs {
+            for (x, y) in [(a, b), (b, a)] {
+                let dead_ok = sets
+                    .iter()
+                    .filter(|d| !REVIVE_OWN_SETS_ONLY || d.owner == me)
+                    .any(|d| d.cards.iter().any(|c| fits(c, s.suit, x)));
+                let hand_ok = hand.iter().any(|c| fits(c, s.suit, y));
+                if dead_ok && hand_ok {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
+/// Tambah 1..=2 kartu seangka (joker boleh) ke set mati yang sudah ada.
+pub fn add_to_dead_set(set: &mut DeadSet, cards: &[Card]) -> Result<(), GameError> {
+    if !(1..=2).contains(&cards.len()) {
+        return Err(GameError::BadSize);
+    }
+    if cards.iter().any(|c| !c.is_joker() && c.rank != set.rank) {
+        return Err(GameError::BadSet);
+    }
+    set.cards.extend_from_slice(cards);
+    Ok(())
+}
+
+pub fn can_add_dead(hand: &[Card], sets: &[DeadSet]) -> bool {
+    sets.iter()
+        .any(|s| hand.iter().any(|c| c.is_joker() || c.rank == s.rank))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::Suit::*;
 
+        #[test]
+    fn add_to_dead_set_rules() {
+        let mut set = build_dead_set(0, &[c(13, Diamonds, 0), c(13, Spades, 1), c(13, Hearts, 2)]).unwrap();
+        add_to_dead_set(&mut set, &[c(13, Clubs, 3)]).unwrap();
+        assert_eq!(set.cards.len(), 4);
+        assert_eq!(add_to_dead_set(&mut set, &[c(12, Clubs, 4)]), Err(GameError::BadSet));
+        assert_eq!(
+            add_to_dead_set(&mut set, &[c(13, Clubs, 5), c(13, Hearts, 6), c(13, Hearts, 7)]),
+            Err(GameError::BadSize)
+        );
+        assert_eq!(set.cards.len(), 4);
+    }
+        #[test]
+    fn dead_set_rules() {
+        assert!(build_dead_set(0, &[c(9, Clubs, 0), c(9, Spades, 1), c(9, Diamonds, 2)]).is_ok());
+        assert_eq!(
+            build_dead_set(0, &[c(9, Clubs, 0), c(9, Spades, 1), c(10, Diamonds, 2)]),
+            Err(GameError::BadSet)
+        );
+        assert!(build_dead_set(0, &[c(9, Clubs, 0), c(9, Spades, 1), c(14, Joker, 2)]).is_ok());
+        assert_eq!(
+            build_dead_set(0, &[c(9, Clubs, 0), c(9, Spades, 1)]),
+            Err(GameError::BadSize)
+        );
+        assert_eq!(
+            build_dead_set(0, &[c(14, Joker, 0), c(14, Joker, 1), c(14, Joker, 2)]),
+            Err(GameError::NeedNatural)
+        );
+    }
+
+    #[test]
+    fn revive_needs_adjacent_helper() {
+        let mut series = build_series(
+            0,
+            vec![pl(c(5, Hearts, 0), 5), pl(c(6, Hearts, 1), 6), pl(c(7, Hearts, 2), 7)],
+        )
+        .unwrap();
+        let mut set = build_dead_set(
+            1,
+            &[c(9, Clubs, 10), c(9, Hearts, 11), c(9, Spades, 12)],
+        )
+        .unwrap();
+
+        // 9♥ mati + 8♥ dari tangan menyambung 5-6-7 menjadi 5-9
+        revive(&mut set, &mut series, pl(c(9, Hearts, 11), 9), pl(c(8, Hearts, 20), 8)).unwrap();
+        assert_eq!((series.lo(), series.hi()), (5, 9));
+        assert_eq!(set.cards.len(), 2);
+
+        // 9♣ mati tidak cocok jenisnya, dan tidak ada yang berubah
+        assert_eq!(
+            revive(&mut set, &mut series, pl(c(9, Clubs, 10), 9), pl(c(10, Hearts, 21), 10)),
+            Err(GameError::SuitMismatch)
+        );
+        assert_eq!(set.cards.len(), 2);
+        assert_eq!(series.hi(), 9);
+    }
     fn c(rank: u8, suit: Suit, id: u8) -> Card {
         Card { rank, suit, id }
     }

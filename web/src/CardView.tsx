@@ -10,9 +10,11 @@ interface Props {
 
 export function CardView({ card, pos, selected, small, onClick }: Props) {
   const joker = isJoker(card)
+  const realJoker = card.suit === 'Joker'
   const red = card.suit === 'Diamonds' || card.suit === 'Hearts'
-  const label = pos !== undefined ? posLabel(pos) : card.suit === 'Joker' ? '★' : posLabel(card.rank)
-  const sym = card.suit === 'Joker' ? 'JOKER' : SUIT_SYMBOL[card.suit]
+  const label = pos !== undefined ? posLabel(pos) : realJoker ? 'JKR' : posLabel(card.rank)
+  const suit = realJoker ? '★' : SUIT_SYMBOL[card.suit]
+  const pip = realJoker || (joker && pos !== undefined) ? '★' : suit
 
   return (
     <button
@@ -20,8 +22,11 @@ export function CardView({ card, pos, selected, small, onClick }: Props) {
       onClick={onClick}
       disabled={!onClick}
     >
-      <span>{label}</span>
-      <span>{pos !== undefined && joker ? '★' : sym}</span>
+      <span className="corner">
+        <b>{label}</b>
+        <i>{pip}</i>
+      </span>
+      <span className="pip">{pip}</span>
     </button>
   )
 }
