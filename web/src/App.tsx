@@ -1,5 +1,6 @@
 import { useState } from 'react'
 import Game from './Game'
+import { MusicToggle } from './MusicToggle'
 import './App.css'
 
 interface Session {
@@ -92,6 +93,7 @@ export default function App() {
 
   return (
     <div className="landing">
+      <MusicToggle floating />
       <div className="floaters" aria-hidden>
         {FLOATERS.map((s, i) => (
           <span

@@ -327,3 +327,13 @@ button.roomtag { cursor: pointer; }
   .waittable { height: 300px; }
   .pod { width: 84px; }
 }
+
+/* ---------- tombol musik ---------- */
+.music-toggle { cursor: pointer; line-height: 1; transition: all .15s; }
+.music-toggle.off { opacity: .6; }
+.music-toggle:hover { border-color: var(--gold); opacity: 1; }
+.music-toggle.floating {
+  position: fixed; top: 12px; right: 12px; z-index: 40; display: grid; place-items: center;
+  width: 42px; height: 42px; padding: 0; font-size: 18px; color: var(--text);
+  background: rgba(0,0,0,.35); border: 1px solid var(--line); border-radius: 50%; backdrop-filter: blur(4px);
+}
