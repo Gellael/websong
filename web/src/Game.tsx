@@ -1,6 +1,8 @@
-import { useEffect, useState, type CSSProperties } from 'react'
+import { useEffect, useRef, useState, type CSSProperties } from 'react'
 import { useGameSocket } from './useGameSocket'
 import { CardView, CardBack } from './CardView'
+import { MusicToggle } from './MusicToggle'
+import { sfx } from './audio'
 import {
   addDeadOptions,
   extendOptions,
@@ -87,6 +89,21 @@ export default function Game({ room, name: myName, scoreLimit: createLimit, onLe
     if (phase !== 'Over') setDismissed(false)
   }, [phase])
 
+  // suara kartu terpasang: dipicu setiap jumlah kartu di meja/kartu mati/seri pembuka bertambah,
+  // jadi berlaku untuk langkahmu, pemain lain, maupun bot. Render pertama (atau sambung ulang) tidak berbunyi.
+  const placedCount = view
+    ? view.table.reduce((n, s) => n + s.cards.length, 0) +
+      view.sets.reduce((n, d) => n + d.cards.length, 0) +
+      (view.my_pending?.length ?? 0)
+    : 0
+  const prevPlaced = useRef<number | null>(null)
+  useEffect(() => {
+    if (!view) return
+    const prev = prevPlaced.current
+    prevPlaced.current = placedCount
+    if (prev !== null && placedCount > prev) sfx.place(placedCount - prev)
+  }, [view, placedCount])
+
   const copy = (text: string, key: string) => {
     navigator.clipboard?.writeText(text).catch(() => {})
     setCopied(key)
@@ -99,6 +116,7 @@ export default function Game({ room, name: myName, scoreLimit: createLimit, onLe
   if (joinError) {
     return (
       <div className="landing">
+        <MusicToggle floating />
         <main className="screen center">
           <h1 className="hero-logo small">Song</h1>
           <div className="box">
@@ -117,6 +135,7 @@ export default function Game({ room, name: myName, scoreLimit: createLimit, onLe
     const isHost = waiting?.isHost ?? false
     return (
       <div className="landing">
+        <MusicToggle floating />
         <main className="screen center">
           <h1 className="hero-logo small">Song</h1>
           <p className="tagline">Ruang tunggu</p>
@@ -200,6 +219,7 @@ export default function Game({ room, name: myName, scoreLimit: createLimit, onLe
     ]
     return (
       <div className="landing">
+        <MusicToggle floating />
         {gameWinner === me && <Confetti />}
         <main className="screen center">
           <div className="final-card">
@@ -252,8 +272,10 @@ export default function Game({ room, name: myName, scoreLimit: createLimit, onLe
   const canOpen = ph === 'Opening' && view.alive[me] && !view.my_pending
   const canAct = myTurn || canOpen
 
-  const toggle = (id: number) =>
+  const toggle = (id: number) => {
+    sfx.select(!selected.includes(id))
     setSelected((s) => (s.includes(id) ? s.filter((x) => x !== id) : [...s, id]))
+  }
 
   const hand = sortHand(view.hand, sort)
   const chosen = hand.filter((c) => selected.includes(c.id))
@@ -301,6 +323,7 @@ export default function Game({ room, name: myName, scoreLimit: createLimit, onLe
           Room <b>{room}</b> {copied === 'code' ? '✓' : ''}
         </button>
         <span className="roomtag"> {scoreLimit > 0 ? scoreLimit : '∞'}</span>
+        <MusicToggle />
         <button type="button" className="btn ghost sm" onClick={onLeave}>Keluar</button>
       </header>
 

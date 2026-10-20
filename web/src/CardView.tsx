@@ -1,4 +1,5 @@
 import { type Card, SUIT_SYMBOL, isJoker, posLabel } from './types'
+import { sfx } from './audio'
 
 interface Props {
   card: Card
@@ -21,6 +22,10 @@ export function CardView({ card, pos, selected, small, onClick }: Props) {
       aria-pressed={onClick ? !!selected : undefined}
       className={`card ${red ? 'red' : ''} ${joker ? 'joker' : ''} ${selected ? 'selected' : ''} ${small ? 'small' : ''}`}
       onClick={onClick}
+      // suara hover hanya untuk kartu yang bisa diklik; touch dilewati karena tap sudah punya suara sendiri
+      onPointerEnter={(e) => {
+        if (onClick && e.pointerType === 'mouse') sfx.hover()
+      }}
       disabled={!onClick}
     >
       <span className="corner">
