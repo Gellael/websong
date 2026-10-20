@@ -3,6 +3,7 @@ use crate::{deal, Card, PLAYERS};
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 
+
 /// Skor maksimal untuk pemain yang mati setelah pernah menurunkan kartu.
 pub const MAX_DEAD_SCORE: i32 = 75;
 /// Skor untuk pemain yang mati di awal (tidak bisa membuka seri).
@@ -20,7 +21,6 @@ pub enum Action {
     NewSeries { cards: Vec<Placed> },
     Extend { series: usize, cards: Vec<Placed> },
     Kill { cards: Vec<Card> },
-    Revive { set: usize, dead: Placed, helper: Placed, series: usize },
     AddDead { set: usize, cards: Vec<Card> },
 }
 
@@ -218,25 +218,8 @@ impl GameState {
                 self.hands[player].retain(|c| !cards.iter().any(|k| k.id == c.id));
                 false
             }
-            Action::Revive { set, dead, helper, series } => {
-                check_in_hand(&self.hands[player], &[helper])?;
-                let mut ds = self.sets.get(set).ok_or(GameError::NoSuchSet)?.clone();
-                if REVIVE_OWN_SETS_ONLY && ds.owner != player {
-                    return Err(GameError::NotYourSet);
-                }
-                let mut sr = self.table.get(series).ok_or(GameError::NoSuchSeries)?.clone();
-                revive(&mut ds, &mut sr, dead, helper)?;
-
-                remove_cards(&mut self.hands[player], &[helper]);
-                self.table[series] = sr;
-                if ds.cards.is_empty() {
-                    self.sets.remove(set);
-                } else {
-                    self.sets[set] = ds;
-                }
-                false
-            }
         };
+
         self.played_any[player] = true;
 
         if self.hands[player].is_empty() {
@@ -274,7 +257,6 @@ impl GameState {
             || can_open(h)
             || can_kill(h)
             || can_add_dead(h, &self.sets)
-            || can_revive(p, h, &self.sets, &self.table)
     }
 
     /// Hanya dipanggil kalau minimal satu pemain masih hidup.

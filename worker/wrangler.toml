@@ -1,0 +1,16 @@
+name = "song-server"
+main = "src/index.ts"
+compatibility_date = "2025-09-01"
+
+[[durable_objects.bindings]]
+name = "ROOMS"
+class_name = "SongRoom"
+
+# Paket gratis hanya mendukung Durable Object berbasis SQLite
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["SongRoom"]
+
+[vars]
+# Kosong = semua asal diizinkan (dev). Isi alamat Pages saat deploy.
+ALLOWED_ORIGINS = ""

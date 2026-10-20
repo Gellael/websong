@@ -45,9 +45,15 @@ export function useGameSocket({ room, name }: JoinParams) {
         `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws`
       const ws = new WebSocket(`${base}?${qs}`)
       wsRef.current = ws
-
-      ws.onopen = () => setConnected(true)
+      let heartbeat: number | undefined
+      ws.onopen = () => {
+        setConnected(true)
+        heartbeat = window.setInterval(() => {
+          if (ws.readyState === WebSocket.OPEN) ws.send('{"type":"Ping"}')
+        }, 30000)
+      }
       ws.onclose = () => {
+        window.clearInterval(heartbeat)
         setConnected(false)
         if (!closed) retry = window.setTimeout(connect, 1500)
       }
