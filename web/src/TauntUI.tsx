@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
 import { SPLAT_EMOJI, TAUNTS, TAUNT_EMOJI, type TauntKind, type TauntMsg } from './tauntTypes'
 import './taunt.css'
 
@@ -103,12 +104,14 @@ export function TauntLayer({
   names: string[]
   onDone: (id: string) => void
 }) {
-  return (
+  // dirender langsung di <body> supaya tidak terpengaruh transform/overflow elemen induk di HP
+  return createPortal(
     <div className="taunt-layer" aria-hidden>
       {taunts.map((t) => (
         <Projectile key={t.id} t={t} name={names[t.from] || 'Pemain'} onDone={onDone} />
       ))}
-    </div>
+    </div>,
+    document.body,
   )
 }
 
@@ -124,7 +127,7 @@ export function TauntTray({
 }) {
   const [open, setOpen] = useState(false)
 
-  return (
+  return createPortal(
     <div className="taunt-tray">
       {weapon && (
         <p className="taunt-hint">{cooling ? 'Tunggu sebentar…' : 'Ketuk pemain yang mau dilempar'}</p>
@@ -156,6 +159,7 @@ export function TauntTray({
       >
         {weapon ? TAUNT_EMOJI[weapon] : '🎯'}
       </button>
-    </div>
+    </div>,
+    document.body,
   )
 }

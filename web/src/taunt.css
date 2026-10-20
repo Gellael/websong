@@ -56,15 +56,22 @@
 }
 
 /* target yang bisa diklik saat senjata dipilih */
-.targetable { cursor: crosshair; outline: 2px dashed var(--gold); outline-offset: 3px; }
+/* cursor: pointer wajib agar iOS Safari mau mengirim event ketuk ke elemen non-tombol */
+.targetable {
+  cursor: pointer; outline: 2px dashed var(--gold); outline-offset: 3px;
+  touch-action: manipulation; -webkit-tap-highlight-color: transparent;
+}
 .targetable:hover { filter: brightness(1.25); }
 
 /* tray senjata */
 .taunt-tray {
-  position: fixed; right: 12px; bottom: 12px; z-index: 45; display: flex; flex-direction: column; align-items: flex-end; gap: 8px;
+  position: fixed; right: 12px; bottom: calc(14px + env(safe-area-inset-bottom, 0px)); z-index: 45;
+  display: flex; flex-direction: column; align-items: flex-end; gap: 8px;
+  font-family: 'Inter', system-ui, sans-serif; touch-action: manipulation;
 }
 .taunt-fab {
-  display: grid; place-items: center; width: 50px; height: 50px; padding: 0; font-size: 24px; color: var(--text); cursor: pointer;
+  display: grid; place-items: center; width: 56px; height: 56px; padding: 0; font-size: 26px; color: var(--text); cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
   background: rgba(0,0,0,.55); border: 1px solid var(--line); border-radius: 50%; backdrop-filter: blur(4px);
   box-shadow: 0 6px 18px rgba(0,0,0,.5); transition: transform .15s, border-color .15s;
 }
@@ -75,7 +82,8 @@
   backdrop-filter: blur(6px); animation: tmenu .2s ease-out;
 }
 .taunt-btn {
-  width: 42px; height: 42px; padding: 0; font-size: 22px; cursor: pointer; background: transparent;
+  width: 46px; height: 46px; padding: 0; font-size: 24px; cursor: pointer; background: transparent;
+  -webkit-tap-highlight-color: transparent; touch-action: manipulation;
   border: 2px solid transparent; border-radius: 50%; transition: transform .12s, background .12s;
 }
 .taunt-btn:hover { transform: translateY(-3px); background: rgba(255,255,255,.12); }
