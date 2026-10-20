@@ -10,6 +10,7 @@ enum ClientAction {
     Extend { series: usize, cards: Vec<Placed> },
     Kill { cards: Vec<Card> },
     AddDead { set: usize, cards: Vec<Card> },
+    ReviveDead { set: usize, jokers: Vec<Card> },
 }
 
 #[derive(Serialize)]
@@ -44,6 +45,7 @@ fn apply_inner(state_json: &str, seat: usize, msg_json: &str) -> Result<GameStat
         ClientAction::Extend { series, cards } => Action::Extend { series, cards },
         ClientAction::Kill { cards } => Action::Kill { cards },
         ClientAction::AddDead { set, cards } => Action::AddDead { set, cards },
+        ClientAction::ReviveDead { set, jokers } => Action::ReviveDead { set, jokers },
     };
     g.apply(seat, action).map_err(|e| format!("{e:?}"))?;
     Ok(g)
@@ -91,6 +93,9 @@ pub fn bot_action(state_json: &str, seat: usize) -> String {
         Action::Kill { cards } => serde_json::json!({ "type": "Kill", "cards": cards }),
         Action::AddDead { set, cards } => {
             serde_json::json!({ "type": "AddDead", "set": set, "cards": cards })
+        }
+        Action::ReviveDead { set, jokers } => {
+            serde_json::json!({ "type": "ReviveDead", "set": set, "jokers": jokers })
         }
         #[allow(unreachable_patterns)]
         _ => return String::new(),

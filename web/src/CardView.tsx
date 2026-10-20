@@ -17,6 +17,8 @@ export function CardView({ card, pos, selected, small, onClick }: Props) {
 
   return (
     <button
+      type="button"
+      aria-pressed={onClick ? !!selected : undefined}
       className={`card ${red ? 'red' : ''} ${joker ? 'joker' : ''} ${selected ? 'selected' : ''} ${small ? 'small' : ''}`}
       onClick={onClick}
       disabled={!onClick}

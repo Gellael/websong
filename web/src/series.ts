@@ -3,13 +3,11 @@ import { SUIT_SYMBOL, isJoker, posLabel } from './types'
 
 export interface Option {
   label: string
-  kind: 'new' | 'extend' | 'kill' | 'revive' | 'adddead',
+  kind: 'new' | 'extend' | 'kill' | 'adddead'
   series?: number
   cards: Placed[]
   plain?: Card[]
   set?: number
-  dead?: Placed
-  helper?: Placed
 }
 
 const matches = (c: Card, pos: number) => pos === c.rank || (c.rank === 1 && pos === 14)
@@ -57,7 +55,7 @@ export function newSeriesOptions(cards: Card[]): Option[] {
     const positions = Array.from({ length: n }, (_, i) => s + i)
     const placed = assign(cards, positions)
     if (placed) {
-      out.push({ kind: 'new', cards: placed, label: `Seri baru ${SUIT_SYMBOL[suit]}: ${show(placed)}` })
+      out.push({ kind: 'new', cards: placed, label: `Seri baru ${SUIT_SYMBOL[suit]}  ${show(placed)}` })
     }
   }
   return out
@@ -85,7 +83,7 @@ export function extendOptions(cards: Card[], table: Series[]): Option[] {
           kind: 'extend',
           series: idx,
           cards: placed,
-          label: `Sambung seri #${idx + 1} ${SUIT_SYMBOL[s.suit]}: ${show(placed)}`,
+          label: `Sambung seri #${idx + 1} ${SUIT_SYMBOL[s.suit]}  ${show(placed)}`,
         })
       }
     }
@@ -103,49 +101,9 @@ export function killOptions(cards: Card[]): Option[] {
       kind: 'kill',
       cards: [],
       plain: cards,
-      label: `Matikan ${cards.length} kartu ${posLabel(naturals[0].rank)} (tidak bisa disambung ke seri)`,
+      label: `Matikan ${cards.length} kartu ${posLabel(naturals[0].rank)}`,
     },
   ]
-}
-
-const fitsPos = (c: Card, suit: Suit, pos: number) =>
-  isJoker(c) || (c.suit === suit && matches(c, pos))
-
-/** 1 kartu dari tangan + 1 kartu mati menyambung ke ujung seri. */
-export function reviveOptions(cards: Card[], table: Series[], sets: DeadSet[]): Option[] {
-  if (cards.length !== 1) return []
-  const helper = cards[0]
-  const out: Option[] = []
-  const seen = new Set<string>()
-  table.forEach((s, si) => {
-    const lo = s.cards[0].pos
-    const hi = s.cards[s.cards.length - 1].pos
-    const pairs: [number, number][] = [[lo - 2, lo - 1], [lo - 1, hi + 1], [hi + 1, hi + 2]]
-    for (const [a, b] of pairs) {
-      if (a < 1 || b > 14) continue
-      for (const [x, y] of [[a, b], [b, a]]) {
-        if (!fitsPos(helper, s.suit, y)) continue
-        sets.forEach((d, di) => {
-          for (const dc of d.cards) {
-            if (!fitsPos(dc, s.suit, x)) continue
-            const key = `${si}-${di}-${dc.rank}-${dc.suit}-${x}-${y}`
-            if (seen.has(key)) continue
-            seen.add(key)
-            out.push({
-              kind: 'revive',
-              series: si,
-              set: di,
-              dead: { card: dc, pos: x },
-              helper: { card: helper, pos: y },
-              cards: [],
-              label: `Hidupkan ${posLabel(x)} dari kartu mati + ${posLabel(y)} → sambung seri #${si + 1} ${SUIT_SYMBOL[s.suit]}`,
-            })
-          }
-        })
-      }
-    }
-  })
-  return out
 }
 
 export function addDeadOptions(cards: Card[], sets: DeadSet[]): Option[] {
@@ -160,7 +118,7 @@ export function addDeadOptions(cards: Card[], sets: DeadSet[]): Option[] {
       set: i,
       cards: [],
       plain: cards,
-      label: `Tambah ${cards.length} kartu ke kartu mati ${posLabel(d.rank)} (set #${i + 1})`,
+      label: `Tambah ${cards.length} kartu ke set mati ${posLabel(d.rank)} (#${i + 1})`,
     })
   })
   return out

@@ -6,7 +6,7 @@
 //! yang tidak sah, dan aturan tidak perlu ditulis ulang di sini.
 
 use crate::game::{Action, GameState, Outcome, Phase};
-use crate::series::{can_add_dead, can_extend, can_kill, can_open, DeadSet, Placed, Series};
+use crate::series::{can_add_dead, can_extend, can_kill, can_open, can_revive_dead, DeadSet, Placed, Series};
 use crate::{Card, Suit, PLAYERS};
 
 const SUITS: [Suit; 4] = [Suit::Diamonds, Suit::Clubs, Suit::Hearts, Suit::Spades];
@@ -159,6 +159,19 @@ fn add_dead_candidates(hand: &[Card], sets: &[DeadSet]) -> Vec<(usize, Vec<Card>
     out
 }
 
+/// Kandidat langkah revive: tukar joker-joker dari tangan ke set mati yang belum revived.
+fn revive_dead_candidates(hand: &[Card], sets: &[DeadSet]) -> Vec<(usize, Vec<Card>)> {
+    let jokers: Vec<Card> = hand.iter().copied().filter(|c| c.is_joker()).collect();
+    let mut out = Vec::new();
+    for (i, s) in sets.iter().enumerate() {
+        if s.revived { continue; }
+        let natural_count = s.cards.iter().filter(|c| !c.is_joker()).count();
+        if natural_count == 0 || jokers.len() < natural_count { continue; }
+        out.push((i, jokers[..natural_count].to_vec()));
+    }
+    out
+}
+
 /// Nilai sebuah langkah (makin besar makin bagus). None kalau langkahnya tidak sah.
 fn evaluate(before: &GameState, action: &Action, seat: usize) -> Option<i32> {
     let mut g = before.clone();
@@ -194,7 +207,8 @@ fn evaluate(before: &GameState, action: &Action, seat: usize) -> Option<i32> {
     let future = can_extend(hand, &g.table)
         || can_open(hand)
         || can_kill(hand)
-        || can_add_dead(hand, &g.sets);
+        || can_add_dead(hand, &g.sets)
+        || can_revive_dead(hand, &g.sets);
     Some(-pts - 2 * hand.len() as i32 + if future { 20 } else { -30 } - JOKER_COST * jokers_used)
 }
 
@@ -232,6 +246,9 @@ pub fn choose(g: &GameState, seat: usize) -> Option<Action> {
         }
         for (set, cards) in add_dead_candidates(hand, &g.sets) {
             consider(Action::AddDead { set, cards });
+        }
+        for (set, jokers) in revive_dead_candidates(hand, &g.sets) {
+            consider(Action::ReviveDead { set, jokers });
         }
     }
 

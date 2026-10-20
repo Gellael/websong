@@ -22,6 +22,7 @@ pub enum Action {
     Extend { series: usize, cards: Vec<Placed> },
     Kill { cards: Vec<Card> },
     AddDead { set: usize, cards: Vec<Card> },
+    ReviveDead { set: usize, jokers: Vec<Card> },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -218,6 +219,18 @@ impl GameState {
                 self.hands[player].retain(|c| !cards.iter().any(|k| k.id == c.id));
                 false
             }
+            Action::ReviveDead { set, jokers } => {
+                let wrapped: Vec<Placed> =
+                    jokers.iter().map(|&card| Placed { card, pos: 0 }).collect();
+                check_in_hand(&self.hands[player], &wrapped)?;
+                let ds = self.sets.get_mut(set).ok_or(GameError::NoSuchSet)?;
+                let freed = revive_dead_set(ds, &jokers)?;
+                // hapus joker dari tangan
+                self.hands[player].retain(|c| !jokers.iter().any(|k| k.id == c.id));
+                // kartu asli yang dibebaskan masuk ke tumpukan kartu mati (tidak dimainkan)
+                self.dead_cards.extend(freed);
+                false
+            }
         };
 
         self.played_any[player] = true;
@@ -257,6 +270,7 @@ impl GameState {
             || can_open(h)
             || can_kill(h)
             || can_add_dead(h, &self.sets)
+            || can_revive_dead(h, &self.sets)
     }
 
     /// Hanya dipanggil kalau minimal satu pemain masih hidup.

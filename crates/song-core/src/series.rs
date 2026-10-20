@@ -20,6 +20,7 @@ pub enum GameError {
     CannotAttach,
     BadSet,
     NoSuchSet,
+    SetAlreadyRevived,
 }
 
 /// Kartu beserta posisinya di dalam seri (1..=14, A bisa 1 atau 14).
@@ -183,12 +184,14 @@ pub fn can_extend(hand: &[Card], table: &[Series]) -> bool {
 }
 
 /// Kartu mati: 3..=5 kartu seangka (jenis bebas) yang sudah diturunkan.
-/// Kartu mati tetap di posisinya selamanya dan tidak bisa dihidupkan kembali.
+/// Kalau ada Joker yang ditukar, kartu asli dibuang dan set ditandai `revived`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DeadSet {
     pub owner: usize,
     pub rank: u8,
     pub cards: Vec<Card>,
+    #[serde(default)]
+    pub revived: bool,
 }
 
 pub fn build_dead_set(owner: usize, cards: &[Card]) -> Result<DeadSet, GameError> {
@@ -204,7 +207,7 @@ pub fn build_dead_set(owner: usize, cards: &[Card]) -> Result<DeadSet, GameError
         }
     }
     let rank = rank.ok_or(GameError::NeedNatural)?;
-    Ok(DeadSet { owner, rank, cards: cards.to_vec() })
+    Ok(DeadSet { owner, rank, cards: cards.to_vec(), revived: false })
 }
 
 /// Apakah tangan punya 3+ kartu seangka (joker boleh mengisi, minimal 1 kartu asli)?
@@ -231,6 +234,49 @@ pub fn add_to_dead_set(set: &mut DeadSet, cards: &[Card]) -> Result<(), GameErro
 pub fn can_add_dead(hand: &[Card], sets: &[DeadSet]) -> bool {
     sets.iter()
         .any(|s| hand.iter().any(|c| c.is_joker() || c.rank == s.rank))
+}
+
+/// Tukar Joker dengan kartu asli di set mati.
+/// Kartu asli dikeluarkan dari set (akan dibuang ke dead_cards di game.rs).
+/// Set ditandai `revived` sehingga rank-nya bisa dimainkan ke seri lagi.
+/// Mengembalikan kartu-kartu asli yang dikeluarkan.
+pub fn revive_dead_set(set: &mut DeadSet, jokers: &[Card]) -> Result<Vec<Card>, GameError> {
+    if set.revived {
+        return Err(GameError::SetAlreadyRevived);
+    }
+    if jokers.is_empty() {
+        return Err(GameError::BadSize);
+    }
+    if jokers.iter().any(|c| !c.is_joker()) {
+        return Err(GameError::NeedNatural); // harus semua Joker
+    }
+    // keluarkan semua kartu asli, ganti dengan joker-joker
+    let naturals: Vec<Card> = set.cards.iter().copied().filter(|c| !c.is_joker()).collect();
+    if naturals.is_empty() {
+        return Err(GameError::BadSet);
+    }
+    // butuh minimal sebanyak kartu asli di set
+    if jokers.len() < naturals.len() {
+        return Err(GameError::BadSize);
+    }
+    // ganti kartu asli dengan joker, pertahankan joker yang sudah ada
+    let existing_jokers: Vec<Card> = set.cards.iter().copied().filter(|c| c.is_joker()).collect();
+    set.cards = existing_jokers;
+    // tambahkan joker baru (sebanyak jumlah kartu asli yang diganti)
+    set.cards.extend_from_slice(&jokers[..naturals.len()]);
+    set.revived = true;
+    // kembalikan kartu asli yang dikeluarkan (akan dibuang ke dead_cards)
+    Ok(naturals)
+}
+
+/// Apakah pemain bisa melakukan revive pada salah satu set mati?
+pub fn can_revive_dead(hand: &[Card], sets: &[DeadSet]) -> bool {
+    let joker_count = hand.iter().filter(|c| c.is_joker()).count();
+    sets.iter().any(|s| {
+        if s.revived { return false; }
+        let natural_count = s.cards.iter().filter(|c| !c.is_joker()).count();
+        joker_count >= natural_count && natural_count > 0
+    })
 }
 
 #[cfg(test)]

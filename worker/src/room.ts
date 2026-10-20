@@ -16,6 +16,7 @@ const IDLE_MS = 10 * 60 * 1000 // room yang ditinggal semua pemain dihapus setel
 const GRACE_MS = 30 * 1000 // pemain terputus diberi 30 detik sebelum bot mengambil kursinya
 const BOT_DELAY_MS = 1200 // jeda tiap langkah bot supaya terlihat wajar
 const MAX_BOT_FAILS = 5 // bot berhenti mencoba kalau gagal terus (mencegah loop tanpa akhir)
+const MAX_SCORE_LIMIT = 10_000
 
 interface Seat {
   token: string
@@ -32,6 +33,10 @@ interface RoomData {
   botAt: number | null // kapan bot boleh melangkah
   idleAt: number | null // kapan room yang ditinggal semua pemain dihapus
   botFails: number // jumlah kegagalan bot berturut-turut
+  hostToken: string | null // pembuat room: satu-satunya yang boleh menekan Mulai
+  scoreLimit: number // 0 = tanpa batas
+  gameOver: boolean
+  gameWinner: number | null
 }
 
 interface Attachment {
@@ -47,9 +52,13 @@ const emptyRoom = (): RoomData => ({
   botAt: null,
   idleAt: null,
   botFails: 0,
+  hostToken: null,
+  scoreLimit: 0,
+  gameOver: false,
+  gameWinner: null,
 })
 
-/** Data lama (sebelum ada bot) tidak punya field baru; lengkapi di sini. */
+/** Data lama (sebelum ada bot/host) tidak punya field baru; lengkapi di sini. */
 function normalize(saved: RoomData): RoomData {
   return {
     ...saved,
@@ -57,6 +66,10 @@ function normalize(saved: RoomData): RoomData {
     botAt: saved.botAt ?? null,
     idleAt: saved.idleAt ?? null,
     botFails: saved.botFails ?? 0,
+    hostToken: saved.hostToken ?? null,
+    scoreLimit: saved.scoreLimit ?? 0,
+    gameOver: saved.gameOver ?? false,
+    gameWinner: saved.gameWinner ?? null,
   }
 }
 
@@ -69,6 +82,11 @@ function randomToken(): string {
 function cleanName(raw: string | null): string {
   const n = Array.from((raw ?? '').trim()).slice(0, 16).join('')
   return n || 'Pemain'
+}
+
+function cleanLimit(raw: unknown): number {
+  const n = typeof raw === 'number' ? raw : Number(raw)
+  return Number.isFinite(n) && n > 0 ? Math.min(Math.floor(n), MAX_SCORE_LIMIT) : 0
 }
 
 export class SongRoom extends DurableObject<Env> {
@@ -95,6 +113,7 @@ export class SongRoom extends DurableObject<Env> {
     const url = new URL(request.url)
     const name = cleanName(url.searchParams.get('name'))
     const token = url.searchParams.get('token')
+    const limit = cleanLimit(url.searchParams.get('limit'))
 
     const wasEmpty = this.liveSockets().length === 0
 
@@ -123,6 +142,12 @@ export class SongRoom extends DurableObject<Env> {
           /* abaikan */
         }
       }
+    }
+
+    // orang pertama di room baru = pembuat room, dan dialah yang menentukan batas skor
+    if (this.data.hostToken === null) {
+      this.data.hostToken = joined.token
+      this.data.scoreLimit = limit
     }
 
     // room baru "bangun" dari jeda: pemain lain yang belum kembali dapat 30 detik baru
@@ -189,7 +214,7 @@ export class SongRoom extends DurableObject<Env> {
     if (!att) return
     const d = this.data
 
-    let msg: { type?: string }
+    let msg: { type?: string; scoreLimit?: unknown }
     try {
       msg = JSON.parse(message)
     } catch {
@@ -198,7 +223,36 @@ export class SongRoom extends DurableObject<Env> {
     }
     if (msg.type === 'Ping') return
 
+    // pembuat room memulai permainan; kursi kosong diisi bot
+    if (msg.type === 'StartGame') {
+      if (d.game !== null) {
+        this.send(ws, { type: 'Error', message: 'Permainan sudah berjalan' })
+        return
+      }
+      const seat = d.seats[att.seat]
+      if (!seat || seat.token !== d.hostToken) {
+        this.send(ws, { type: 'Error', message: 'Hanya pembuat room yang bisa memulai' })
+        return
+      }
+      if (d.seats.filter((s) => s !== null).length < 2) {
+        this.send(ws, { type: 'Error', message: 'Minimal 2 pemain untuk memulai' })
+        return
+      }
+      if (msg.scoreLimit !== undefined) d.scoreLimit = cleanLimit(msg.scoreLimit)
+      d.seats = d.seats.map(
+        (s, i) => s ?? { token: randomToken(), name: `Bot ${i + 1}`, bot: true, leftAt: null },
+      )
+      this.startRound()
+      d.botFails = 0
+      await this.broadcast()
+      return
+    }
+
     if (msg.type === 'NextRound') {
+      if (d.gameOver) {
+        this.send(ws, { type: 'Error', message: 'Permainan sudah berakhir' })
+        return
+      }
       const over = d.game !== null && JSON.parse(d.game).phase === 'Over'
       if (!over) {
         this.send(ws, { type: 'Error', message: 'Ronde belum selesai' })
@@ -300,7 +354,7 @@ export class SongRoom extends DurableObject<Env> {
    */
   private botSeatToMove(): number {
     const d = this.data
-    if (d.game === null) return -1
+    if (d.game === null || d.gameOver) return -1
     const g = JSON.parse(d.game) as {
       phase: 'Opening' | 'Playing' | 'Over'
       turn: number
@@ -354,7 +408,7 @@ export class SongRoom extends DurableObject<Env> {
     d.scored = false
   }
 
-  /** Jumlahkan skor ronde ke total, tepat satu kali per ronde. */
+  /** Jumlahkan skor ronde ke total (sekali per ronde), lalu cek batas skor. */
   private settle(): void {
     const d = this.data
     if (d.scored || d.game === null) return
@@ -362,7 +416,21 @@ export class SongRoom extends DurableObject<Env> {
     if (g.phase === 'Over' && g.result) {
       for (let i = 0; i < PLAYERS; i++) d.totals[i] += g.result.scores[i]
       d.scored = true
+      if (d.scoreLimit > 0 && d.totals.some((t) => t >= d.scoreLimit)) {
+        let w = 0
+        for (let i = 1; i < PLAYERS; i++) if (d.totals[i] < d.totals[w]) w = i
+        d.gameOver = true
+        d.gameWinner = w // skor terkecil menang
+      }
     }
+  }
+
+  /** Sebelum mulai: kalau pembuat room keluar, pemain tersisa pertama jadi pembuat. */
+  private ensureHost(): void {
+    const d = this.data
+    if (d.game !== null) return
+    if (d.seats.some((s) => s !== null && s.token === d.hostToken)) return
+    d.hostToken = d.seats.find((s) => s !== null)?.token ?? null
   }
 
   private liveSockets(excludeCid?: string): { ws: WebSocket; att: Attachment }[] {
@@ -436,10 +504,10 @@ export class SongRoom extends DurableObject<Env> {
 
   private async broadcast(excludeCid?: string): Promise<void> {
     const d = this.data
-    const joined = d.seats.filter((s) => s !== null).length
-    if (d.game === null && joined === PLAYERS) this.startRound()
+    this.ensureHost()
     this.settle()
 
+    const joined = d.seats.filter((s) => s !== null).length
     const names = d.seats.map((s) => s?.name ?? '')
     const bots = d.seats.map((s) => s?.bot === true)
     const live = this.liveSockets(excludeCid)
@@ -448,9 +516,27 @@ export class SongRoom extends DurableObject<Env> {
     for (const { ws, att } of live) {
       if (d.game !== null) {
         const view = JSON.parse(view_for(d.game, att.seat))
-        this.send(ws, { type: 'State', view, totals: d.totals, names, online, bots })
+        this.send(ws, {
+          type: 'State',
+          view,
+          totals: d.totals,
+          names,
+          online,
+          bots,
+          scoreLimit: d.scoreLimit,
+          gameOver: d.gameOver,
+          gameWinner: d.gameWinner,
+        })
       } else {
-        this.send(ws, { type: 'Waiting', seat: att.seat, joined, names })
+        const isHost = d.seats[att.seat]?.token === d.hostToken
+        this.send(ws, {
+          type: 'Waiting',
+          seat: att.seat,
+          joined,
+          names,
+          isHost,
+          scoreLimit: d.scoreLimit,
+        })
       }
     }
     await this.plan(excludeCid)

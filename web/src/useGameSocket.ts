@@ -4,6 +4,15 @@ import type { Card, Placed, PlayerView, ServerMsg } from './types'
 export interface JoinParams {
   room: string
   name: string
+  /** Batas skor pilihan pembuat room (0 = tanpa batas). Server hanya memakainya saat room dibuat. */
+  scoreLimit?: number
+}
+
+export interface WaitingInfo {
+  seat: number
+  joined: number
+  names: string[]
+  isHost: boolean
 }
 
 const EMPTY5 = ['', '', '', '', '']
@@ -14,9 +23,9 @@ function makeToken(): string {
   return Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('')
 }
 
-export function useGameSocket({ room, name }: JoinParams) {
+export function useGameSocket({ room, name, scoreLimit: createLimit = 0 }: JoinParams) {
   const [connected, setConnected] = useState(false)
-  const [waiting, setWaiting] = useState<{ seat: number; joined: number; names: string[] } | null>(null)
+  const [waiting, setWaiting] = useState<WaitingInfo | null>(null)
   const [view, setView] = useState<PlayerView | null>(null)
   const [totals, setTotals] = useState<number[]>([0, 0, 0, 0, 0])
   const [names, setNames] = useState<string[]>(EMPTY5)
@@ -24,11 +33,15 @@ export function useGameSocket({ room, name }: JoinParams) {
   const [bots, setBots] = useState<boolean[]>([false, false, false, false, false])
   const [error, setError] = useState<string | null>(null)
   const [joinError, setJoinError] = useState<string | null>(null)
+  const [scoreLimit, setScoreLimit] = useState(createLimit)
+  const [gameOver, setGameOver] = useState(false)
+  const [gameWinner, setGameWinner] = useState<number | null>(null)
   const wsRef = useRef<WebSocket | null>(null)
 
   useEffect(() => {
     let closed = false
     let retry: number | undefined
+    let errTimer: number | undefined
     const tokenKey = `song-token-${room}`
 
     const connect = () => {
@@ -38,15 +51,17 @@ export function useGameSocket({ room, name }: JoinParams) {
         sessionStorage.setItem(tokenKey, token)
       }
       const qs = new URLSearchParams({ room, name, token })
+      if (createLimit > 0) qs.set('limit', String(createLimit))
 
-      // Production: VITE_WS_URL (mis. wss://song-xxx.fly.dev/ws).
-      // Development: kosong, pakai proxy Vite di host yang sama.
+      // Production: VITE_WS_URL (mis. wss://song-server.xxx.workers.dev/ws).
+      // Development: kosong, pakai host yang sama.
       const base: string =
         import.meta.env.VITE_WS_URL ??
         `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws`
       const ws = new WebSocket(`${base}?${qs}`)
       wsRef.current = ws
       let heartbeat: number | undefined
+
       ws.onopen = () => {
         setConnected(true)
         heartbeat = window.setInterval(() => {
@@ -70,18 +85,24 @@ export function useGameSocket({ room, name }: JoinParams) {
             ws.close()
             break
           case 'Waiting':
-            setWaiting({ seat: msg.seat, joined: msg.joined, names: msg.names })
+            setWaiting({ seat: msg.seat, joined: msg.joined, names: msg.names, isHost: msg.isHost })
+            setScoreLimit(msg.scoreLimit ?? 0)
             break
           case 'State':
             setView(msg.view)
             setTotals(msg.totals)
             setNames(msg.names)
             setOnline(msg.online)
+            setBots(msg.bots ?? [false, false, false, false, false])
+            setScoreLimit(msg.scoreLimit ?? 0)
+            setGameOver(msg.gameOver ?? false)
+            setGameWinner(msg.gameWinner ?? null)
             setError(null)
-            setBots(msg.bots)
             break
           case 'Error':
             setError(msg.message)
+            window.clearTimeout(errTimer)
+            errTimer = window.setTimeout(() => setError(null), 4500)
             break
         }
       }
@@ -91,9 +112,10 @@ export function useGameSocket({ room, name }: JoinParams) {
     return () => {
       closed = true
       window.clearTimeout(retry)
+      window.clearTimeout(errTimer)
       wsRef.current?.close()
     }
-  }, [room, name])
+  }, [room, name, createLimit])
 
   const send = (data: object) => {
     const ws = wsRef.current
@@ -105,20 +127,20 @@ export function useGameSocket({ room, name }: JoinParams) {
     (series: number, cards: Placed[]) => send({ type: 'Extend', series, cards }),
     [],
   )
-  const nextRound = useCallback(() => send({ type: 'NextRound' }), [])
   const kill = useCallback((cards: Card[]) => send({ type: 'Kill', cards }), [])
-  const revive = useCallback(
-    (set: number, dead: Placed, helper: Placed, series: number) =>
-      send({ type: 'Revive', set, dead, helper, series }),
-    [],
-  )
   const addDead = useCallback(
     (set: number, cards: Card[]) => send({ type: 'AddDead', set, cards }),
     [],
   )
+  const nextRound = useCallback(() => send({ type: 'NextRound' }), [])
+  const startGame = useCallback(
+    (limit: number) => send({ type: 'StartGame', scoreLimit: limit }),
+    [],
+  )
 
   return {
-    connected, waiting, view, totals, names, online, error, joinError,
-    newSeries, extend, nextRound, kill, revive, addDead, bots,
+    connected, waiting, view, totals, names, online, bots, error, joinError,
+    scoreLimit, gameOver, gameWinner,
+    newSeries, extend, kill, addDead, nextRound, startGame,
   }
 }
