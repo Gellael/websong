@@ -38,7 +38,7 @@ pub struct RoundResult {
     pub scores: [i32; PLAYERS],
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GameState {
     pub hands: [Vec<Card>; PLAYERS],
     pub dead_cards: Vec<Card>,
@@ -83,6 +83,12 @@ impl GameState {
     pub fn new(rng: &mut impl Rng, starter: Option<usize>) -> Self {
         let d = deal(rng);
         Self::from_hands(d.hands, d.dead, starter)
+    }
+        /// Kocokan deterministik dari seed (dipakai di WASM, seed dari JS).
+    pub fn new_seeded(seed: u64, starter: Option<usize>) -> Self {
+        use rand::SeedableRng;
+        let mut rng = rand::rngs::StdRng::seed_from_u64(seed);
+        Self::new(&mut rng, starter)
     }
 
     pub fn from_hands(
