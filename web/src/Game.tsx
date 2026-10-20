@@ -128,7 +128,7 @@ export default function Game({ room, name: myName, scoreLimit: createLimit, onLe
           </button>
 
           <div className="chips-row">
-            <span className="pill">🎯 {limitText}</span>
+            <span className="pill"> {limitText}</span>
             <button type="button" className="pill btnlike" onClick={() => copy(inviteLink, 'link')}>
               {copied === 'link' ? '✓ Tautan tersalin' : '🔗 Salin tautan undangan'}
             </button>
