@@ -1,6 +1,6 @@
 pub mod game;
 pub mod series;
-
+pub mod bot;
 pub use game::*;
 pub use series::*;
 

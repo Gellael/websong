@@ -44,7 +44,7 @@ export type ServerMsg =
   | { type: 'Joined'; token: string; seat: number }
   | { type: 'JoinFailed'; message: string }
   | { type: 'Waiting'; seat: number; joined: number; names: string[] }
-  | { type: 'State'; view: PlayerView; totals: number[]; names: string[]; online: boolean[] }
+  | { type: 'State'; view: PlayerView; totals: number[]; names: string[]; online: boolean[]; bots: boolean[] }
   | { type: 'Error'; message: string }
 
 export const SUIT_SYMBOL: Record<Suit, string> = {

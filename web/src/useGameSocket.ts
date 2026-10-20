@@ -21,6 +21,7 @@ export function useGameSocket({ room, name }: JoinParams) {
   const [totals, setTotals] = useState<number[]>([0, 0, 0, 0, 0])
   const [names, setNames] = useState<string[]>(EMPTY5)
   const [online, setOnline] = useState<boolean[]>([true, true, true, true, true])
+  const [bots, setBots] = useState<boolean[]>([false, false, false, false, false])
   const [error, setError] = useState<string | null>(null)
   const [joinError, setJoinError] = useState<string | null>(null)
   const wsRef = useRef<WebSocket | null>(null)
@@ -77,6 +78,7 @@ export function useGameSocket({ room, name }: JoinParams) {
             setNames(msg.names)
             setOnline(msg.online)
             setError(null)
+            setBots(msg.bots)
             break
           case 'Error':
             setError(msg.message)
@@ -117,6 +119,6 @@ export function useGameSocket({ room, name }: JoinParams) {
 
   return {
     connected, waiting, view, totals, names, online, error, joinError,
-    newSeries, extend, nextRound, kill, revive, addDead,
+    newSeries, extend, nextRound, kill, revive, addDead, bots,
   }
 }

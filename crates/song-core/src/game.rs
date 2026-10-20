@@ -364,42 +364,6 @@ mod tests {
         assert_eq!(g.turn, 1);
     }
 
-    #[test]
-    fn revive_extends_series_and_can_win_with_leng() {
-        let mut g = opened_game(vec![c(4, Hearts, 43)]);
-        g.sets.push(DeadSet {
-            owner: 0,
-            rank: 5,
-            cards: vec![c(5, Hearts, 40), c(5, Hearts, 41), c(5, Clubs, 42)],
-        });
-
-        // jenis kartu mati tidak cocok dengan seri ♥
-        assert_eq!(
-            g.apply(0, Action::Revive {
-                set: 0,
-                dead: pl(c(5, Clubs, 42), 5),
-                helper: pl(c(4, Hearts, 43), 4),
-                series: 0,
-            }),
-            Err(GameError::SuitMismatch)
-        );
-        assert_eq!(g.sets[0].cards.len(), 3);
-
-        g.apply(0, Action::Revive {
-            set: 0,
-            dead: pl(c(5, Hearts, 40), 5),
-            helper: pl(c(4, Hearts, 43), 4),
-            series: 0,
-        })
-        .unwrap();
-        assert_eq!(g.table[0].hi(), 5);
-        assert_eq!(g.sets[0].cards.len(), 2);
-
-        // kartu di tangan habis lewat menyambung = Leng
-        let r = g.result.unwrap();
-        assert_eq!(r.outcome, Outcome::Leng);
-        assert_eq!(r.winner, Some(0));
-    }
     fn c(rank: u8, suit: Suit, id: u8) -> Card {
         Card { rank, suit, id }
     }

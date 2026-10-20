@@ -1,16 +1,27 @@
 import { DurableObject } from 'cloudflare:workers'
 import wasmModule from '../pkg/song_wasm_bg.wasm'
-import { initSync, new_game, apply as wasmApply, view_for } from '../pkg/song_wasm.js'
+import {
+  initSync,
+  new_game,
+  apply as wasmApply,
+  view_for,
+  bot_action,
+} from '../pkg/song_wasm.js'
 import type { Env } from './env'
 
 initSync({ module: wasmModule })
 
 const PLAYERS = 5
 const IDLE_MS = 10 * 60 * 1000 // room yang ditinggal semua pemain dihapus setelah 10 menit
+const GRACE_MS = 30 * 1000 // pemain terputus diberi 30 detik sebelum bot mengambil kursinya
+const BOT_DELAY_MS = 1200 // jeda tiap langkah bot supaya terlihat wajar
+const MAX_BOT_FAILS = 5 // bot berhenti mencoba kalau gagal terus (mencegah loop tanpa akhir)
 
 interface Seat {
   token: string
   name: string
+  bot: boolean // true = kursi dimainkan bot; pemain asli atau pemain baru bisa merebutnya
+  leftAt: number | null // kapan pemain terputus (null = terhubung), untuk hitung mundur 30 detik
 }
 
 interface RoomData {
@@ -18,6 +29,9 @@ interface RoomData {
   totals: number[]
   scored: boolean
   game: string | null // GameState dalam JSON (dikelola oleh WASM)
+  botAt: number | null // kapan bot boleh melangkah
+  idleAt: number | null // kapan room yang ditinggal semua pemain dihapus
+  botFails: number // jumlah kegagalan bot berturut-turut
 }
 
 interface Attachment {
@@ -30,7 +44,21 @@ const emptyRoom = (): RoomData => ({
   totals: Array(PLAYERS).fill(0),
   scored: false,
   game: null,
+  botAt: null,
+  idleAt: null,
+  botFails: 0,
 })
+
+/** Data lama (sebelum ada bot) tidak punya field baru; lengkapi di sini. */
+function normalize(saved: RoomData): RoomData {
+  return {
+    ...saved,
+    seats: saved.seats.map((s) => s && { ...s, bot: s.bot ?? false, leftAt: s.leftAt ?? null }),
+    botAt: saved.botAt ?? null,
+    idleAt: saved.idleAt ?? null,
+    botFails: saved.botFails ?? 0,
+  }
+}
 
 function randomToken(): string {
   const b = new Uint8Array(16)
@@ -51,7 +79,7 @@ export class SongRoom extends DurableObject<Env> {
     // muat state dari storage (penting setelah objek bangun dari hibernasi)
     this.ctx.blockConcurrencyWhile(async () => {
       const saved = await this.ctx.storage.get<RoomData>('data')
-      if (saved) this.data = saved
+      if (saved) this.data = normalize(saved)
     })
     // ping dari client dijawab tanpa membangunkan objek
     this.ctx.setWebSocketAutoResponse(
@@ -67,6 +95,8 @@ export class SongRoom extends DurableObject<Env> {
     const url = new URL(request.url)
     const name = cleanName(url.searchParams.get('name'))
     const token = url.searchParams.get('token')
+
+    const wasEmpty = this.liveSockets().length === 0
 
     const pair = new WebSocketPair()
     const client = pair[0]
@@ -95,7 +125,14 @@ export class SongRoom extends DurableObject<Env> {
       }
     }
 
-    await this.ctx.storage.deleteAlarm()
+    // room baru "bangun" dari jeda: pemain lain yang belum kembali dapat 30 detik baru
+    if (wasEmpty) {
+      const now = Date.now()
+      this.data.seats.forEach((s, i) => {
+        if (s && !s.bot && s.leftAt !== null && i !== joined.seat) s.leftAt = now
+      })
+    }
+
     this.send(server, { type: 'Joined', token: joined.token, seat: joined.seat })
     await this.broadcast()
     return new Response(null, { status: 101, webSocket: client })
@@ -106,15 +143,42 @@ export class SongRoom extends DurableObject<Env> {
     name: string,
   ): { seat: number; token: string } | { error: string } {
     const d = this.data
+
+    // 1) pemain lama kembali dengan tokennya: ambil kursinya lagi (dari bot kalau sudah diambil alih)
     if (token) {
       const i = d.seats.findIndex((s) => s !== null && s.token === token)
-      if (i >= 0) return { seat: i, token }
+      if (i >= 0) {
+        const s = d.seats[i]!
+        s.bot = false
+        s.leftAt = null
+        d.botFails = 0
+        return { seat: i, token }
+      }
     }
-    if (d.game !== null) return { error: 'Permainan di room ini sudah berjalan' }
+
+    const t = token && token.length >= 16 && token.length <= 64 ? token : randomToken()
+
+    // 2) permainan sedang berjalan: pemain baru hanya bisa mengisi kursi yang dipegang bot.
+    //    Kalau ada kursi bot dengan nama yang sama, utamakan itu.
+    if (d.game !== null) {
+      const botSeats: number[] = []
+      d.seats.forEach((s, i) => {
+        if (s?.bot) botSeats.push(i)
+      })
+      if (botSeats.length === 0) {
+        return { error: 'Permainan sudah berjalan dan tidak ada kursi kosong' }
+      }
+      const same = botSeats.find((i) => d.seats[i]!.name.toLowerCase() === name.toLowerCase())
+      const i = same ?? botSeats[0]
+      d.seats[i] = { token: t, name, bot: false, leftAt: null }
+      d.botFails = 0
+      return { seat: i, token: t }
+    }
+
+    // 3) belum mulai: ambil kursi kosong
     const free = d.seats.findIndex((s) => s === null)
     if (free < 0) return { error: 'Room penuh' }
-    const t = token && token.length >= 16 && token.length <= 64 ? token : randomToken()
-    d.seats[free] = { token: t, name }
+    d.seats[free] = { token: t, name, bot: false, leftAt: null }
     return { seat: free, token: t }
   }
 
@@ -141,6 +205,7 @@ export class SongRoom extends DurableObject<Env> {
         return
       }
       this.startRound()
+      d.botFails = 0
       await this.broadcast()
       return
     }
@@ -158,6 +223,7 @@ export class SongRoom extends DurableObject<Env> {
       return
     }
     d.game = JSON.stringify(out.state)
+    d.botFails = 0
     await this.broadcast()
   }
 
@@ -176,25 +242,99 @@ export class SongRoom extends DurableObject<Env> {
     const d = this.data
 
     const stillThere = this.liveSockets(att.cid).some((l) => l.att.seat === att.seat)
-    if (!stillThere && d.game === null) d.seats[att.seat] = null // belum mulai: bebaskan kursi
+    if (!stillThere) {
+      const seat = d.seats[att.seat]
+      if (seat) {
+        if (d.game === null) {
+          d.seats[att.seat] = null // belum mulai: bebaskan kursi
+        } else if (!seat.bot) {
+          seat.leftAt = Date.now() // sedang main: mulai hitung mundur 30 detik
+        }
+      }
+    }
 
     await this.broadcast(att.cid)
+  }
 
-    if (this.liveSockets(att.cid).length === 0) {
-      if (d.game !== null) {
-        await this.ctx.storage.setAlarm(Date.now() + IDLE_MS)
-      } else if (d.seats.every((s) => s === null)) {
+  // ---------- alarm: 30 detik habis, giliran bot, atau room ditinggal ----------
+  async alarm(): Promise<void> {
+    const d = this.data
+    const now = Date.now()
+
+    // tidak ada manusia sama sekali: permainan dijeda, hanya cek penghapusan room
+    if (this.liveSockets().length === 0) {
+      if (d.idleAt !== null && now >= d.idleAt) {
         await this.ctx.storage.deleteAll()
         this.data = emptyRoom()
       }
+      return
     }
+
+    let changed = false
+
+    // pemain yang 30 detik tidak kembali: kursinya diambil bot
+    for (const s of d.seats) {
+      if (s && !s.bot && s.leftAt !== null && now >= s.leftAt + GRACE_MS) {
+        s.bot = true
+        s.leftAt = null
+        changed = true
+      }
+    }
+
+    // giliran bot
+    if (d.botAt !== null && now >= d.botAt && this.botTurn()) {
+      d.botAt = null
+      this.botStep()
+      changed = true
+    }
+
+    if (changed) await this.broadcast()
+    else await this.plan()
   }
 
-  // room yang ditinggal semua pemain selama 10 menit dihapus
-  async alarm(): Promise<void> {
-    if (this.liveSockets().length === 0) {
-      await this.ctx.storage.deleteAll()
-      this.data = emptyRoom()
+  // ---------- logika bot ----------
+  /**
+   * Kursi bot yang harus bergerak sekarang, atau -1 kalau tidak ada.
+   * Fase Playing: kursi yang gilirannya. Fase Opening: semua pemain hidup menurunkan
+   * seri pembuka bersamaan (tanpa giliran), jadi cari bot yang belum menurunkannya.
+   */
+  private botSeatToMove(): number {
+    const d = this.data
+    if (d.game === null) return -1
+    const g = JSON.parse(d.game) as {
+      phase: 'Opening' | 'Playing' | 'Over'
+      turn: number
+      alive: boolean[]
+      pending: (unknown[] | null)[]
+    }
+    if (g.phase === 'Over') return -1
+    if (g.phase === 'Playing') return d.seats[g.turn]?.bot === true ? g.turn : -1
+    return d.seats.findIndex((s, i) => s?.bot === true && g.alive[i] && g.pending[i] === null)
+  }
+
+  private botTurn(): boolean {
+    return this.botSeatToMove() >= 0
+  }
+
+  /** Satu langkah bot. Kalau gagal, hitung kegagalan supaya tidak berputar selamanya. */
+  private botStep(): void {
+    const d = this.data
+    if (d.game === null) return
+    try {
+      const seat = this.botSeatToMove()
+      if (seat < 0) return
+      const action = bot_action(d.game, seat)
+      if (!action) throw new Error('bot tidak punya langkah')
+      const out = JSON.parse(wasmApply(d.game, seat, action)) as {
+        error: string | null
+        state: unknown
+      }
+      if (out.error) throw new Error(out.error)
+      d.game = JSON.stringify(out.state)
+      d.botFails = 0
+    } catch (e) {
+      d.botFails += 1
+      console.warn('bot gagal:', e)
     }
   }
 
@@ -243,6 +383,57 @@ export class SongRoom extends DurableObject<Env> {
     }
   }
 
+  /**
+   * Atur alarm berikutnya dan simpan state.
+   * Mengembalikan true kalau room dihapus (tidak ada yang perlu disimpan lagi).
+   */
+  private async plan(excludeCid?: string): Promise<boolean> {
+    const d = this.data
+    const now = Date.now()
+    const live = this.liveSockets(excludeCid)
+    const times: number[] = []
+
+    if (live.length === 0) {
+      // tidak ada manusia: permainan dijeda (bot tidak jalan sendiri), room dihapus setelah IDLE_MS
+      d.botAt = null
+      if (d.game === null) {
+        if (d.seats.every((s) => s === null)) {
+          await this.ctx.storage.deleteAll()
+          this.data = emptyRoom()
+          return true
+        }
+      } else {
+        if (d.idleAt === null) d.idleAt = now + IDLE_MS
+        times.push(d.idleAt)
+      }
+    } else {
+      d.idleAt = null
+
+      // hitung mundur 30 detik untuk kursi manusia yang terputus
+      const online = new Set(live.map((l) => l.att.seat))
+      d.seats.forEach((s, i) => {
+        if (!s || s.bot || d.game === null) return
+        if (online.has(i)) s.leftAt = null
+        else if (s.leftAt === null) s.leftAt = now // koneksi hilang tanpa event close
+        if (s.leftAt !== null) times.push(s.leftAt + GRACE_MS)
+      })
+
+      // jadwalkan langkah bot kalau sekarang giliran kursi bot
+      if (this.botTurn() && d.botFails < MAX_BOT_FAILS) {
+        if (d.botAt === null) d.botAt = now + BOT_DELAY_MS
+        times.push(d.botAt)
+      } else {
+        d.botAt = null
+      }
+    }
+
+    if (times.length > 0) await this.ctx.storage.setAlarm(Math.min(...times))
+    else await this.ctx.storage.deleteAlarm()
+
+    await this.ctx.storage.put('data', d)
+    return false
+  }
+
   private async broadcast(excludeCid?: string): Promise<void> {
     const d = this.data
     const joined = d.seats.filter((s) => s !== null).length
@@ -250,17 +441,18 @@ export class SongRoom extends DurableObject<Env> {
     this.settle()
 
     const names = d.seats.map((s) => s?.name ?? '')
+    const bots = d.seats.map((s) => s?.bot === true)
     const live = this.liveSockets(excludeCid)
     const online = d.seats.map((_, i) => live.some((l) => l.att.seat === i))
 
     for (const { ws, att } of live) {
       if (d.game !== null) {
         const view = JSON.parse(view_for(d.game, att.seat))
-        this.send(ws, { type: 'State', view, totals: d.totals, names, online })
+        this.send(ws, { type: 'State', view, totals: d.totals, names, online, bots })
       } else {
         this.send(ws, { type: 'Waiting', seat: att.seat, joined, names })
       }
     }
-    await this.ctx.storage.put('data', d)
+    await this.plan(excludeCid)
   }
 }

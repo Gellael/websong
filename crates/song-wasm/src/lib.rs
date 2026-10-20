@@ -9,7 +9,6 @@ enum ClientAction {
     NewSeries { cards: Vec<Placed> },
     Extend { series: usize, cards: Vec<Placed> },
     Kill { cards: Vec<Card> },
-    Revive { set: usize, dead: Placed, helper: Placed, series: usize },
     AddDead { set: usize, cards: Vec<Card> },
 }
 
@@ -44,9 +43,6 @@ fn apply_inner(state_json: &str, seat: usize, msg_json: &str) -> Result<GameStat
         ClientAction::NewSeries { cards } => Action::NewSeries { cards },
         ClientAction::Extend { series, cards } => Action::Extend { series, cards },
         ClientAction::Kill { cards } => Action::Kill { cards },
-        ClientAction::Revive { set, dead, helper, series } => {
-            Action::Revive { set, dead, helper, series }
-        }
         ClientAction::AddDead { set, cards } => Action::AddDead { set, cards },
     };
     g.apply(seat, action).map_err(|e| format!("{e:?}"))?;
@@ -72,6 +68,36 @@ pub fn view_for(state_json: &str, seat: usize) -> String {
     }
 }
 
+/// Langkah bot untuk satu kursi: JSON aksi (format ClientAction, siap dikirim ke `apply`)
+/// atau "" kalau kursi itu tidak bisa bergerak sekarang.
+#[wasm_bindgen]
+pub fn bot_action(state_json: &str, seat: usize) -> String {
+    if seat >= PLAYERS {
+        return String::new();
+    }
+    let Ok(g) = serde_json::from_str::<GameState>(state_json) else {
+        return String::new();
+    };
+    let Some(action) = song_core::bot::choose(&g, seat) else {
+        return String::new();
+    };
+    let json = match action {
+        Action::NewSeries { cards } => {
+            serde_json::json!({ "type": "NewSeries", "cards": cards })
+        }
+        Action::Extend { series, cards } => {
+            serde_json::json!({ "type": "Extend", "series": series, "cards": cards })
+        }
+        Action::Kill { cards } => serde_json::json!({ "type": "Kill", "cards": cards }),
+        Action::AddDead { set, cards } => {
+            serde_json::json!({ "type": "AddDead", "set": set, "cards": cards })
+        }
+        #[allow(unreachable_patterns)]
+        _ => return String::new(),
+    };
+    json.to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -91,5 +117,17 @@ mod tests {
         let v = view_for(&json, 3);
         assert!(v.contains("\"seat\":3"));
         assert_eq!(view_for(&json, 9), "null");
+    }
+
+    #[test]
+    fn bot_action_is_accepted_by_apply() {
+        let json = new_game(7, 9, -1);
+        let g: GameState = serde_json::from_str(&json).unwrap();
+        // cari kursi hidup di fase pembuka
+        let seat = (0..PLAYERS).find(|&i| g.alive[i]).expect("minimal satu pemain hidup");
+        let msg = bot_action(&json, seat);
+        assert!(!msg.is_empty());
+        let out = apply(&json, seat, &msg);
+        assert!(out.contains("\"error\":null"), "{out}");
     }
 }

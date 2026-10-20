@@ -13,4 +13,4 @@ new_sqlite_classes = ["SongRoom"]
 
 [vars]
 # Kosong = semua asal diizinkan (dev). Isi alamat Pages saat deploy.
-ALLOWED_ORIGINS = ""
+ALLOWED_ORIGINS = "https://song-game-81q.pages.dev"
