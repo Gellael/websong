@@ -1,11 +1,16 @@
 import { useEffect, useRef, useState, useCallback } from 'react'
 import type { Card, Placed, PlayerView, ServerMsg } from './types'
+import type { TauntKind, TauntMsg } from './tauntTypes'
 
 export interface JoinParams {
   room: string
   name: string
   /** Batas skor pilihan pembuat room (0 = tanpa batas). Server hanya memakainya saat room dibuat. */
   scoreLimit?: number
+  /** Tampilkan room di daftar meja (hanya dipakai server saat room dibuat). */
+  isPublic?: boolean
+  /** Dipanggil setiap ada yang melempar sesuatu (termasuk dirimu sendiri). */
+  onTaunt?: (t: TauntMsg) => void
 }
 
 export interface WaitingInfo {
@@ -23,7 +28,13 @@ function makeToken(): string {
   return Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('')
 }
 
-export function useGameSocket({ room, name, scoreLimit: createLimit = 0 }: JoinParams) {
+export function useGameSocket({
+  room,
+  name,
+  scoreLimit: createLimit = 0,
+  isPublic = false,
+  onTaunt,
+}: JoinParams) {
   const [connected, setConnected] = useState(false)
   const [waiting, setWaiting] = useState<WaitingInfo | null>(null)
   const [view, setView] = useState<PlayerView | null>(null)
@@ -38,10 +49,17 @@ export function useGameSocket({ room, name, scoreLimit: createLimit = 0 }: JoinP
   const [gameWinner, setGameWinner] = useState<number | null>(null)
   const wsRef = useRef<WebSocket | null>(null)
 
+  // callback lemparan disimpan di ref supaya koneksi tidak diulang setiap render
+  const onTauntRef = useRef(onTaunt)
+  useEffect(() => {
+    onTauntRef.current = onTaunt
+  })
+
   useEffect(() => {
     let closed = false
     let retry: number | undefined
     let errTimer: number | undefined
+    const tauntTimers: number[] = []
     const tokenKey = `song-token-${room}`
 
     const connect = () => {
@@ -52,6 +70,7 @@ export function useGameSocket({ room, name, scoreLimit: createLimit = 0 }: JoinP
       }
       const qs = new URLSearchParams({ room, name, token })
       if (createLimit > 0) qs.set('limit', String(createLimit))
+      if (isPublic) qs.set('public', '1')
 
       // Production: VITE_WS_URL (mis. wss://song-server.xxx.workers.dev/ws).
       // Development: kosong, pakai host yang sama.
@@ -74,8 +93,10 @@ export function useGameSocket({ room, name, scoreLimit: createLimit = 0 }: JoinP
         if (!closed) retry = window.setTimeout(connect, 1500)
       }
       ws.onmessage = (e) => {
-        const msg: ServerMsg = JSON.parse(e.data)
+        const msg = JSON.parse(e.data) as ServerMsg | TauntMsg | { type: 'Pong' }
         switch (msg.type) {
+          case 'Pong':
+            break
           case 'Joined':
             sessionStorage.setItem(tokenKey, msg.token)
             break
@@ -99,6 +120,12 @@ export function useGameSocket({ room, name, scoreLimit: createLimit = 0 }: JoinP
             setGameWinner(msg.gameWinner ?? null)
             setError(null)
             break
+          case 'Taunt': {
+            const fire = () => onTauntRef.current?.(msg)
+            if (msg.delay && msg.delay > 0) tauntTimers.push(window.setTimeout(fire, msg.delay))
+            else fire()
+            break
+          }
           case 'Error':
             setError(msg.message)
             window.clearTimeout(errTimer)
@@ -113,9 +140,10 @@ export function useGameSocket({ room, name, scoreLimit: createLimit = 0 }: JoinP
       closed = true
       window.clearTimeout(retry)
       window.clearTimeout(errTimer)
+      tauntTimers.forEach((t) => window.clearTimeout(t))
       wsRef.current?.close()
     }
-  }, [room, name, createLimit])
+  }, [room, name, createLimit, isPublic])
 
   const send = (data: object) => {
     const ws = wsRef.current
@@ -137,10 +165,11 @@ export function useGameSocket({ room, name, scoreLimit: createLimit = 0 }: JoinP
     (limit: number) => send({ type: 'StartGame', scoreLimit: limit }),
     [],
   )
+  const taunt = useCallback((to: number, kind: TauntKind) => send({ type: 'Taunt', to, kind }), [])
 
   return {
     connected, waiting, view, totals, names, online, bots, error, joinError,
     scoreLimit, gameOver, gameWinner,
-    newSeries, extend, kill, addDead, nextRound, startGame,
+    newSeries, extend, kill, addDead, nextRound, startGame, taunt,
   }
 }

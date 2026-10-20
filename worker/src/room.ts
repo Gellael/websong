@@ -8,6 +8,7 @@ import {
   bot_action,
 } from '../pkg/song_wasm.js'
 import type { Env } from './env'
+import type { RoomInfo } from './registry'
 
 initSync({ module: wasmModule })
 
@@ -17,6 +18,11 @@ const GRACE_MS = 30 * 1000 // pemain terputus diberi 30 detik sebelum bot mengam
 const BOT_DELAY_MS = 1200 // jeda tiap langkah bot supaya terlihat wajar
 const MAX_BOT_FAILS = 5 // bot berhenti mencoba kalau gagal terus (mencegah loop tanpa akhir)
 const MAX_SCORE_LIMIT = 10_000
+const REPORT_REFRESH_MS = 10 * 60 * 1000 // lapor ulang ke registry walau tidak ada perubahan
+const TAUNT_KINDS = ['banana', 'tomato', 'egg', 'sandal', 'poop']
+const TAUNT_COOLDOWN_MS = 1500 // jeda minimal antar lemparan dari satu pemain
+const BOT_REVENGE = 0.6 // peluang bot membalas kalau dilempar pemain
+const BOT_REVENGE_DELAY_MS = 1800
 
 interface Seat {
   token: string
@@ -37,6 +43,8 @@ interface RoomData {
   scoreLimit: number // 0 = tanpa batas
   gameOver: boolean
   gameWinner: number | null
+  code: string // kode room (dipakai untuk lapor ke registry)
+  isPublic: boolean // tampil di daftar meja
 }
 
 interface Attachment {
@@ -56,9 +64,11 @@ const emptyRoom = (): RoomData => ({
   scoreLimit: 0,
   gameOver: false,
   gameWinner: null,
+  code: '',
+  isPublic: false,
 })
 
-/** Data lama (sebelum ada bot/host) tidak punya field baru; lengkapi di sini. */
+/** Data lama (sebelum ada bot/host/registry) tidak punya field baru; lengkapi di sini. */
 function normalize(saved: RoomData): RoomData {
   return {
     ...saved,
@@ -70,6 +80,8 @@ function normalize(saved: RoomData): RoomData {
     scoreLimit: saved.scoreLimit ?? 0,
     gameOver: saved.gameOver ?? false,
     gameWinner: saved.gameWinner ?? null,
+    code: saved.code ?? '',
+    isPublic: saved.isPublic ?? false,
   }
 }
 
@@ -91,6 +103,9 @@ function cleanLimit(raw: unknown): number {
 
 export class SongRoom extends DurableObject<Env> {
   private data: RoomData = emptyRoom()
+  private lastReport = ''
+  private lastReportAt = 0
+  private lastTaunt = new Map<number, number>() // kursi -> waktu lemparan terakhir
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env)
@@ -114,6 +129,8 @@ export class SongRoom extends DurableObject<Env> {
     const name = cleanName(url.searchParams.get('name'))
     const token = url.searchParams.get('token')
     const limit = cleanLimit(url.searchParams.get('limit'))
+    const wantPublic = url.searchParams.get('public') === '1'
+    const code = (url.searchParams.get('room') ?? '').trim().toUpperCase().slice(0, 12)
 
     const wasEmpty = this.liveSockets().length === 0
 
@@ -144,10 +161,13 @@ export class SongRoom extends DurableObject<Env> {
       }
     }
 
-    // orang pertama di room baru = pembuat room, dan dialah yang menentukan batas skor
+    if (this.data.code === '') this.data.code = code
+
+    // orang pertama di room baru = pembuat room; dialah yang menentukan batas skor dan apakah meja tampil
     if (this.data.hostToken === null) {
       this.data.hostToken = joined.token
       this.data.scoreLimit = limit
+      this.data.isPublic = wantPublic
     }
 
     // room baru "bangun" dari jeda: pemain lain yang belum kembali dapat 30 detik baru
@@ -214,7 +234,7 @@ export class SongRoom extends DurableObject<Env> {
     if (!att) return
     const d = this.data
 
-    let msg: { type?: string; scoreLimit?: unknown }
+    let msg: { type?: string; scoreLimit?: unknown; to?: unknown; kind?: unknown }
     try {
       msg = JSON.parse(message)
     } catch {
@@ -222,6 +242,12 @@ export class SongRoom extends DurableObject<Env> {
       return
     }
     if (msg.type === 'Ping') return
+
+    // lempar kulit pisang dan sejenisnya: hanya diteruskan, tidak mengubah state game
+    if (msg.type === 'Taunt') {
+      this.handleTaunt(att.seat, msg.to, msg.kind)
+      return
+    }
 
     // pembuat room memulai permainan; kursi kosong diisi bot
     if (msg.type === 'StartGame') {
@@ -318,8 +344,10 @@ export class SongRoom extends DurableObject<Env> {
     // tidak ada manusia sama sekali: permainan dijeda, hanya cek penghapusan room
     if (this.liveSockets().length === 0) {
       if (d.idleAt !== null && now >= d.idleAt) {
+        const code = d.code
         await this.ctx.storage.deleteAll()
         this.data = emptyRoom()
+        await this.releaseRegistry(code)
       }
       return
     }
@@ -451,6 +479,82 @@ export class SongRoom extends DurableObject<Env> {
     }
   }
 
+  // ---------- lempar-lemparan ----------
+  private handleTaunt(from: number, to: unknown, kind: unknown): void {
+    const d = this.data
+    if (typeof to !== 'number' || !Number.isInteger(to) || to < 0 || to >= PLAYERS || to === from) {
+      return
+    }
+    if (typeof kind !== 'string' || !TAUNT_KINDS.includes(kind)) return
+    if (!d.seats[from] || !d.seats[to]) return
+
+    const now = Date.now()
+    if (now - (this.lastTaunt.get(from) ?? 0) < TAUNT_COOLDOWN_MS) return
+    this.lastTaunt.set(from, now)
+
+    this.broadcastTaunt(from, to, kind)
+
+    // bot yang dilempar kadang membalas, dengan jeda supaya terasa wajar
+    if (d.seats[to]?.bot && !d.seats[from]?.bot && Math.random() < BOT_REVENGE) {
+      const back = TAUNT_KINDS[Math.floor(Math.random() * TAUNT_KINDS.length)]
+      this.broadcastTaunt(to, from, back, BOT_REVENGE_DELAY_MS)
+    }
+  }
+
+  private broadcastTaunt(from: number, to: number, kind: string, delay?: number): void {
+    const msg = {
+      type: 'Taunt',
+      from,
+      to,
+      kind,
+      id: crypto.randomUUID(),
+      ...(delay ? { delay } : {}),
+    }
+    for (const { ws } of this.liveSockets()) this.send(ws, msg)
+  }
+
+  // ---------- registry (daftar meja + batas 50 room) ----------
+  private registry() {
+    return this.env.REGISTRY.get(this.env.REGISTRY.idFromName('main'))
+  }
+
+  /** Laporkan keadaan room ke registry. Hanya dikirim kalau ada perubahan. */
+  private async reportRegistry(humansOnline: boolean): Promise<void> {
+    const d = this.data
+    if (!d.code) return
+    const host = d.seats.find((s) => s !== null && s.token === d.hostToken)
+    const info: RoomInfo = {
+      host: host?.name ?? '',
+      joined: d.seats.filter((s) => s !== null).length,
+      scoreLimit: d.scoreLimit,
+      status: d.game === null ? 'waiting' : 'playing',
+      isPublic: d.isPublic,
+      online: humansOnline,
+      gameOver: d.gameOver,
+    }
+    const sig = JSON.stringify(info)
+    const now = Date.now()
+    if (sig === this.lastReport && now - this.lastReportAt < REPORT_REFRESH_MS) return
+    try {
+      await this.registry().report(d.code, info)
+      this.lastReport = sig
+      this.lastReportAt = now
+    } catch (e) {
+      console.warn('lapor registry gagal:', e)
+    }
+  }
+
+  private async releaseRegistry(code: string): Promise<void> {
+    this.lastReport = ''
+    this.lastReportAt = 0
+    if (!code) return
+    try {
+      await this.registry().release(code)
+    } catch (e) {
+      console.warn('release registry gagal:', e)
+    }
+  }
+
   /**
    * Atur alarm berikutnya dan simpan state.
    * Mengembalikan true kalau room dihapus (tidak ada yang perlu disimpan lagi).
@@ -466,8 +570,10 @@ export class SongRoom extends DurableObject<Env> {
       d.botAt = null
       if (d.game === null) {
         if (d.seats.every((s) => s === null)) {
+          const code = d.code
           await this.ctx.storage.deleteAll()
           this.data = emptyRoom()
+          await this.releaseRegistry(code)
           return true
         }
       } else {
@@ -499,6 +605,7 @@ export class SongRoom extends DurableObject<Env> {
     else await this.ctx.storage.deleteAlarm()
 
     await this.ctx.storage.put('data', d)
+    await this.reportRegistry(live.length > 0)
     return false
   }
 

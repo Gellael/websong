@@ -7,10 +7,19 @@ compatibility_date = "2025-09-01"
 name = "ROOMS"
 class_name = "SongRoom"
 
+[[durable_objects.bindings]]
+name = "REGISTRY"
+class_name = "SongRegistry"
+
 # Paket gratis hanya mendukung Durable Object berbasis SQLite
 [[migrations]]
 tag = "v1"
 new_sqlite_classes = ["SongRoom"]
+
+# v2: registry daftar meja + batas 50 room
+[[migrations]]
+tag = "v2"
+new_sqlite_classes = ["SongRegistry"]
 
 [vars]
 # Kosong = semua asal diizinkan (dev). Isi alamat Pages saat deploy.

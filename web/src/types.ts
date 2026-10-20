@@ -46,6 +46,14 @@ export interface PlayerView {
   result: RoundResult | null
 }
 
+export interface TableInfo {
+  room: string
+  host: string
+  joined: number
+  scoreLimit: number
+  status: 'waiting' | 'playing'
+}
+
 export type ServerMsg =
   | { type: 'Joined'; token: string; seat: number }
   | { type: 'JoinFailed'; message: string }

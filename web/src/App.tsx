@@ -1,12 +1,15 @@
 import { useState } from 'react'
 import Game from './Game'
 import { MusicToggle } from './MusicToggle'
+import { TableList } from './TableList'
+import { useTables } from './useTables'
 import './App.css'
 
 interface Session {
   room: string
   name: string
   scoreLimit: number
+  isPublic?: boolean
 }
 
 const LETTERS = 'ABCDEFGHJKLMNPQRSTUVWXYZ'
@@ -55,13 +58,22 @@ export default function App() {
   const [scoreLimit, setScoreLimit] = useState(200)
   const [customScore, setCustomScore] = useState('')
   const [showCustom, setShowCustom] = useState(false)
+  const [isPublic, setIsPublic] = useState(true)
+
+  // daftar meja hanya dimuat saat tab "Gabung" dibuka dan belum ada sesi
+  const { tables, loading, failed } = useTables(5000, !session && tab === 'join')
 
   const ready = name.trim().length > 0
   const effectiveScore = showCustom ? parseInt(customScore, 10) || 0 : scoreLimit
   const customInvalid = showCustom && effectiveScore < 50
 
-  const join = (code: string, limit = 0) => {
-    const s: Session = { room: code.trim().toUpperCase(), name: name.trim(), scoreLimit: limit }
+  const join = (code: string, limit = 0, pub = false) => {
+    const s: Session = {
+      room: code.trim().toUpperCase(),
+      name: name.trim(),
+      scoreLimit: limit,
+      isPublic: pub,
+    }
     if (!s.room || !s.name) return
     try {
       localStorage.setItem('song-name', s.name)
@@ -86,6 +98,7 @@ export default function App() {
         room={session.room}
         name={session.name}
         scoreLimit={session.scoreLimit}
+        isPublic={session.isPublic ?? false}
         onLeave={leave}
       />
     )
@@ -189,11 +202,21 @@ export default function App() {
                       : 'Tanpa batas skor, main sampai kalian berhenti.'}
                 </p>
               </div>
+
+              <label className="check">
+                <input
+                  type="checkbox"
+                  checked={isPublic}
+                  onChange={(e) => setIsPublic(e.target.checked)}
+                />
+                <span>Tampilkan di daftar meja (pemain lain bisa gabung tanpa kode)</span>
+              </label>
+
               <button
                 type="button"
                 className="btn big"
                 disabled={!ready || customInvalid}
-                onClick={() => join(randomCode(), effectiveScore)}
+                onClick={() => join(randomCode(), effectiveScore, isPublic)}
               >
                 Buat room baru
               </button>
@@ -203,6 +226,14 @@ export default function App() {
             </div>
           ) : (
             <div className="pane">
+              <TableList
+                tables={tables}
+                loading={loading}
+                failed={failed}
+                canJoin={ready}
+                onJoin={(code) => join(code)}
+              />
+              <div className="divider"><span>atau pakai kode</span></div>
               <input
                 className="codeinput"
                 value={room}

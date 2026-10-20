@@ -2,6 +2,8 @@ import { useEffect, useRef, useState, type CSSProperties } from 'react'
 import { useGameSocket } from './useGameSocket'
 import { CardView, CardBack } from './CardView'
 import { MusicToggle } from './MusicToggle'
+import { TauntLayer, TauntTray } from './TauntUI'
+import { TAUNT_COOLDOWN_MS, type TauntKind, type TauntMsg } from './tauntTypes'
 import { sfx } from './audio'
 import {
   addDeadOptions,
@@ -29,9 +31,20 @@ function sortHand(hand: Card[], mode: SortMode): Card[] {
   return [...hand].sort((a, b) => key(a) - key(b) || a.id - b.id)
 }
 
-function Avatar({ name, color, bot }: { name: string; color: string; bot?: boolean }) {
+/** seat dipakai animasi lemparan untuk mencari posisi avatar di layar. */
+function Avatar({
+  name,
+  color,
+  bot,
+  seat,
+}: {
+  name: string
+  color: string
+  bot?: boolean
+  seat?: number
+}) {
   return (
-    <div className="avatar" style={cv(color)}>
+    <div className="avatar" style={cv(color)} data-seat={seat}>
       {bot ? '🤖' : (name || '?').charAt(0).toUpperCase()}
     </div>
   )
@@ -60,21 +73,44 @@ interface Props {
   room: string
   name: string
   scoreLimit: number
+  isPublic?: boolean
   onLeave: () => void
 }
 
-export default function Game({ room, name: myName, scoreLimit: createLimit, onLeave }: Props) {
+export default function Game({
+  room,
+  name: myName,
+  scoreLimit: createLimit,
+  isPublic,
+  onLeave,
+}: Props) {
+  // lemparan yang sedang beranimasi (harus dideklarasikan sebelum useGameSocket)
+  const [flying, setFlying] = useState<TauntMsg[]>([])
+  const onTaunt = (t: TauntMsg) => {
+    if (document.hidden) return // tab tidak terlihat: lewati animasinya
+    setFlying((f) => [...f.slice(-7), t])
+  }
+  const finishTaunt = (id: string) => setFlying((f) => f.filter((x) => x.id !== id))
+
   const {
     connected, waiting, view, totals, names, online, bots, error, joinError,
     scoreLimit, gameOver, gameWinner,
-    newSeries, extend, kill, addDead, nextRound, startGame,
-  } = useGameSocket({ room, name: myName, scoreLimit: createLimit })
+    newSeries, extend, kill, addDead, nextRound, startGame, taunt,
+  } = useGameSocket({
+    room,
+    name: myName,
+    scoreLimit: createLimit,
+    isPublic,
+    onTaunt,
+  })
 
   const [selected, setSelected] = useState<number[]>([])
   const [dismissed, setDismissed] = useState(false)
   const [showFinal, setShowFinal] = useState(false)
   const [sort, setSort] = useState<SortMode>('suit')
   const [copied, setCopied] = useState<string | null>(null)
+  const [weapon, setWeapon] = useState<TauntKind | null>(null)
+  const [cooling, setCooling] = useState(false)
 
   const phase = view?.phase
   const turn = view?.turn
@@ -111,6 +147,17 @@ export default function Game({ room, name: myName, scoreLimit: createLimit, onLe
   }
   const inviteLink = `${location.origin}/?room=${room}`
   const limitText = scoreLimit > 0 ? `Batas skor ${scoreLimit}` : 'Tanpa batas skor'
+
+  // lempar senjata yang dipilih ke pemain `to`
+  const throwAt = (to: number) => {
+    if (!weapon || cooling) return
+    taunt(to, weapon)
+    setCooling(true)
+    window.setTimeout(() => setCooling(false), TAUNT_COOLDOWN_MS)
+  }
+
+  // nama untuk label lemparan: di ruang tunggu namanya ada di `waiting`, di meja ada di `names`
+  const layerNames = view ? names : (waiting?.names ?? names)
 
   /* ---------------- gagal masuk ---------------- */
   if (joinError) {
@@ -160,16 +207,24 @@ export default function Game({ room, name: myName, scoreLimit: createLimit, onLe
                 <span>/ 5 pemain</span>
               </div>
             </div>
-            {list.map((n, i) => (
-              <div key={i} className={`wseat w${i} ${n ? 'filled' : ''}`} style={cv(COLORS[i])}>
-                <Avatar name={n} color={COLORS[i]} />
-                <div className="pname">
-                  {n || 'menunggu…'}
-                  {i === waiting?.seat ? ' (kamu)' : ''}
+            {list.map((n, i) => {
+              const canHit = !!weapon && !!n && i !== waiting?.seat
+              return (
+                <div
+                  key={i}
+                  className={`wseat w${i} ${n ? 'filled' : ''} ${canHit ? 'targetable' : ''}`}
+                  style={cv(COLORS[i])}
+                  onClick={canHit ? () => throwAt(i) : undefined}
+                >
+                  <Avatar name={n} color={COLORS[i]} seat={n ? i : undefined} />
+                  <div className="pname">
+                    {n || 'menunggu…'}
+                    {i === waiting?.seat ? ' (kamu)' : ''}
+                  </div>
+                  {i === waiting?.seat && isHost && <div className="ptag">👑 pembuat room</div>}
                 </div>
-                {i === waiting?.seat && isHost && <div className="ptag">👑 pembuat room</div>}
-              </div>
-            ))}
+              )
+            })}
           </div>
 
           {isHost ? (
@@ -198,6 +253,9 @@ export default function Game({ room, name: myName, scoreLimit: createLimit, onLe
 
           <button type="button" className="btn ghost" onClick={onLeave}>Keluar</button>
         </main>
+
+        <TauntLayer taunts={flying} names={layerNames} onDone={finishTaunt} />
+        <TauntTray weapon={weapon} cooling={cooling} onPick={setWeapon} />
       </div>
     )
   }
@@ -345,11 +403,12 @@ export default function Game({ room, name: myName, scoreLimit: createLimit, onLe
           return (
             <div
               key={i}
-              className={`opp ${active ? 'active' : ''} ${!alive ? 'dead' : ''}`}
+              className={`opp ${active ? 'active' : ''} ${!alive ? 'dead' : ''} ${weapon ? 'targetable' : ''}`}
               style={cv(COLORS[i])}
+              onClick={weapon ? () => throwAt(i) : undefined}
             >
               <div className="opp-head">
-                <Avatar name={names[i]} color={COLORS[i]} bot={isBot} />
+                <Avatar name={names[i]} color={COLORS[i]} bot={isBot} seat={i} />
                 <div className="opp-name">
                   <div className="pname">
                     {nm(i)} {isBot && <span className="botbadge">BOT</span>}
@@ -430,7 +489,7 @@ export default function Game({ room, name: myName, scoreLimit: createLimit, onLe
 
       {/* kamu */}
       <section className={`mebar ${canAct ? 'mine' : ''}`} style={cv(COLORS[me])}>
-        <Avatar name={myName} color={COLORS[me]} />
+        <Avatar name={myName} color={COLORS[me]} seat={me} />
         <div className="mebar-text">
           <div className="pname">
             {myName} <span className="muted">· {totals[me]} poin{scoreLimit > 0 ? ` / ${scoreLimit}` : ''}</span>
@@ -533,6 +592,9 @@ export default function Game({ room, name: myName, scoreLimit: createLimit, onLe
           </div>
         </div>
       )}
+
+      <TauntLayer taunts={flying} names={layerNames} onDone={finishTaunt} />
+      <TauntTray weapon={weapon} cooling={cooling} onPick={setWeapon} />
     </div>
   )
 }

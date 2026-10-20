@@ -1,4 +1,4 @@
-use axum::http::{header, HeaderMap, StatusCode};
+use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
 use axum::{
     extract::{
         ws::{Message, WebSocket, WebSocketUpgrade},
@@ -6,12 +6,12 @@ use axum::{
     },
     response::IntoResponse,
     routing::get,
-    Router,
+    Json, Router,
 };
 use futures_util::{SinkExt, StreamExt};
 use rand::Rng;
 use serde::{Deserialize, Serialize};
-use song_core::{Action, Card, GameState, Phase, Placed, PlayerView, PLAYERS};
+use song_core::{bot, Action, Card, GameState, Phase, Placed, PlayerView, PLAYERS};
 use std::{
     collections::HashMap,
     sync::{Arc, Mutex},
@@ -19,15 +19,28 @@ use std::{
 };
 use tokio::sync::mpsc::{self, UnboundedSender};
 
+/// Total room yang boleh ada di server sekaligus.
+const MAX_ROOMS: usize = 50;
+/// Jumlah meja yang ditampilkan di daftar halaman utama.
+const MAX_LISTED: usize = 8;
+/// Jeda bot sebelum melangkah, supaya gerakannya bisa diikuti pemain.
+const BOT_DELAY_MS: u64 = 900;
+
 #[derive(Deserialize)]
 #[serde(tag = "type")]
 enum ClientMsg {
+    Ping,
+    StartGame {
+        #[serde(rename = "scoreLimit")]
+        #[allow(dead_code)]
+        score_limit: Option<i32>,
+    },
     NewSeries { cards: Vec<Placed> },
     Extend { series: usize, cards: Vec<Placed> },
-    NextRound,
     Kill { cards: Vec<Card> },
-    Revive { set: usize, dead: Placed, helper: Placed, series: usize },
     AddDead { set: usize, cards: Vec<Card> },
+    ReviveDead { set: usize, jokers: Vec<Card> },
+    NextRound,
 }
 
 #[derive(Serialize)]
@@ -35,14 +48,39 @@ enum ClientMsg {
 enum ServerMsg {
     Joined { token: String, seat: usize },
     JoinFailed { message: String },
-    Waiting { seat: usize, joined: usize, names: [String; PLAYERS] },
+    Waiting {
+        seat: usize,
+        joined: usize,
+        names: [String; PLAYERS],
+        #[serde(rename = "isHost")]
+        is_host: bool,
+        #[serde(rename = "scoreLimit")]
+        score_limit: i32,
+    },
     State {
         view: PlayerView,
         totals: [i32; PLAYERS],
         names: [String; PLAYERS],
         online: [bool; PLAYERS],
+        bots: [bool; PLAYERS],
+        #[serde(rename = "scoreLimit")]
+        score_limit: i32,
+        #[serde(rename = "gameOver")]
+        game_over: bool,
+        #[serde(rename = "gameWinner")]
+        game_winner: Option<usize>,
     },
     Error { message: String },
+}
+
+#[derive(Serialize)]
+struct TableInfo {
+    room: String,
+    host: String,
+    joined: usize,
+    #[serde(rename = "scoreLimit")]
+    score_limit: i32,
+    status: &'static str, // "waiting" | "playing"
 }
 
 #[derive(Deserialize)]
@@ -50,12 +88,17 @@ struct JoinQuery {
     room: String,
     name: String,
     token: Option<String>,
+    /// Batas skor, hanya dipakai saat room dibuat (0 / kosong = tanpa batas).
+    limit: Option<i32>,
+    /// "1" = tampil di daftar meja, hanya dipakai saat room dibuat.
+    public: Option<String>,
 }
 
 struct Seat {
     token: String,
     name: String,
-    tx: Option<UnboundedSender<ServerMsg>>, // None = sedang terputus
+    tx: Option<UnboundedSender<ServerMsg>>, // None = terputus (atau bot)
+    bot: bool,
 }
 
 #[derive(Default)]
@@ -64,6 +107,12 @@ struct Room {
     game: Option<GameState>,
     totals: [i32; PLAYERS],
     scored: bool,
+    host: usize,
+    public: bool,
+    score_limit: i32,
+    game_over: bool,
+    game_winner: Option<usize>,
+    bot_pending: bool,
 }
 
 type Rooms = Arc<Mutex<HashMap<String, Room>>>;
@@ -75,6 +124,7 @@ async fn main() {
     let app = Router::new()
         .route("/health", get(|| async { "ok" }))
         .route("/ws", get(ws_handler))
+        .route("/rooms", get(list_rooms))
         .with_state(rooms);
 
     let port = std::env::var("PORT").unwrap_or_else(|_| "3001".into());
@@ -97,6 +147,18 @@ fn origin_ok(headers: &HeaderMap) -> bool {
     allowed.split(',').any(|a| a.trim() == origin)
 }
 
+/// Nilai header CORS untuk endpoint HTTP biasa (/rooms).
+fn cors_origin(headers: &HeaderMap) -> Option<String> {
+    let Ok(allowed) = std::env::var("ALLOWED_ORIGINS") else {
+        return Some("*".to_string());
+    };
+    let origin = headers.get(header::ORIGIN).and_then(|v| v.to_str().ok())?;
+    allowed
+        .split(',')
+        .any(|a| a.trim() == origin)
+        .then(|| origin.to_string())
+}
+
 async fn ws_handler(
     ws: WebSocketUpgrade,
     headers: HeaderMap,
@@ -108,6 +170,43 @@ async fn ws_handler(
     }
     ws.on_upgrade(move |socket| handle_socket(socket, rooms, q))
         .into_response()
+}
+
+/// Daftar meja publik: maksimal MAX_LISTED, yang masih menunggu ditaruh di atas.
+async fn list_rooms(headers: HeaderMap, State(rooms): State<Rooms>) -> impl IntoResponse {
+    let mut out: Vec<TableInfo> = {
+        let map = rooms.lock().unwrap();
+        map.iter()
+            .filter(|(_, r)| r.public && !r.game_over && humans_online(r))
+            .map(|(code, r)| TableInfo {
+                room: code.clone(),
+                host: r.seats[r.host]
+                    .as_ref()
+                    .map(|s| s.name.clone())
+                    .unwrap_or_default(),
+                joined: r.seats.iter().filter(|s| s.is_some()).count(),
+                score_limit: r.score_limit,
+                status: if r.game.is_none() { "waiting" } else { "playing" },
+            })
+            .collect()
+    };
+    out.sort_by(|a, b| {
+        (b.status == "waiting")
+            .cmp(&(a.status == "waiting"))
+            .then(b.joined.cmp(&a.joined))
+            .then(a.room.cmp(&b.room))
+    });
+    out.truncate(MAX_LISTED);
+
+    let mut h = HeaderMap::new();
+    if let Some(o) = cors_origin(&headers) {
+        if let Ok(v) = HeaderValue::from_str(&o) {
+            h.insert(header::ACCESS_CONTROL_ALLOW_ORIGIN, v);
+        }
+    }
+    h.insert(header::VARY, HeaderValue::from_static("Origin"));
+    h.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    (h, Json(out))
 }
 
 fn new_token() -> String {
@@ -127,35 +226,39 @@ fn start_round(r: &mut Room) {
     r.scored = false;
 }
 
-/// Jumlahkan skor ronde ke total, tepat satu kali per ronde.
+/// Jumlahkan skor ronde ke total (sekali per ronde) dan cek batas skor.
 fn settle(r: &mut Room) {
     if r.scored {
         return;
     }
-    if let Some(g) = &r.game {
-        if g.phase == Phase::Over {
-            if let Some(res) = &g.result {
-                for i in 0..PLAYERS {
-                    r.totals[i] += res.scores[i];
-                }
-                r.scored = true;
-            }
+    let scores = match &r.game {
+        Some(g) if g.phase == Phase::Over => g.result.as_ref().map(|x| x.scores),
+        _ => None,
+    };
+    if let Some(sc) = scores {
+        for i in 0..PLAYERS {
+            r.totals[i] += sc[i];
+        }
+        r.scored = true;
+        if r.score_limit > 0 && r.totals.iter().any(|&t| t >= r.score_limit) {
+            r.game_over = true;
+            r.game_winner = (0..PLAYERS).min_by_key(|&i| (r.totals[i], i));
         }
     }
 }
 
 fn broadcast(r: &mut Room) {
-    let joined = r.seats.iter().filter(|s| s.is_some()).count();
-    if r.game.is_none() && joined == PLAYERS {
-        start_round(r);
-    }
     settle(r);
+    let joined = r.seats.iter().filter(|s| s.is_some()).count();
 
     let names: [String; PLAYERS] = std::array::from_fn(|i| {
         r.seats[i].as_ref().map(|s| s.name.clone()).unwrap_or_default()
     });
-    let online: [bool; PLAYERS] =
-        std::array::from_fn(|i| r.seats[i].as_ref().map_or(false, |s| s.tx.is_some()));
+    let online: [bool; PLAYERS] = std::array::from_fn(|i| {
+        r.seats[i].as_ref().map_or(false, |s| s.bot || s.tx.is_some())
+    });
+    let bots: [bool; PLAYERS] =
+        std::array::from_fn(|i| r.seats[i].as_ref().map_or(false, |s| s.bot));
 
     for i in 0..PLAYERS {
         let Some(seat) = &r.seats[i] else { continue };
@@ -166,22 +269,108 @@ fn broadcast(r: &mut Room) {
                 totals: r.totals,
                 names: names.clone(),
                 online,
+                bots,
+                score_limit: r.score_limit,
+                game_over: r.game_over,
+                game_winner: r.game_winner,
             },
-            None => ServerMsg::Waiting { seat: i, joined, names: names.clone() },
+            None => ServerMsg::Waiting {
+                seat: i,
+                joined,
+                names: names.clone(),
+                is_host: i == r.host,
+                score_limit: r.score_limit,
+            },
         };
         let _ = tx.send(msg);
     }
 }
 
+/// Ada minimal satu pemain manusia yang sedang terhubung.
+fn humans_online(r: &Room) -> bool {
+    r.seats
+        .iter()
+        .any(|s| s.as_ref().map_or(false, |s| !s.bot && s.tx.is_some()))
+}
+
+fn all_offline(r: &Room) -> bool {
+    !humans_online(r)
+}
+
+/// Satu langkah bot. Bot memainkan kursi bot, dan juga kursi pemain yang terputus.
+fn bot_step(r: &mut Room) -> bool {
+    let auto: [bool; PLAYERS] = std::array::from_fn(|i| {
+        r.seats[i].as_ref().map_or(false, |s| s.bot || s.tx.is_none())
+    });
+    let Some(g) = r.game.as_mut() else { return false };
+    match g.phase {
+        Phase::Over => false,
+        Phase::Opening => {
+            for seat in 0..PLAYERS {
+                if auto[seat] && g.alive[seat] {
+                    if let Some(a) = bot::choose(g, seat) {
+                        if g.apply(seat, a).is_ok() {
+                            return true;
+                        }
+                    }
+                }
+            }
+            false
+        }
+        Phase::Playing => {
+            let t = g.turn;
+            if !auto[t] {
+                return false;
+            }
+            match bot::choose(g, t) {
+                Some(a) => g.apply(t, a).is_ok(),
+                None => false,
+            }
+        }
+    }
+}
+
+fn spawn_bots(rooms: Rooms, code: String) {
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(Duration::from_millis(BOT_DELAY_MS)).await;
+            let mut map = rooms.lock().unwrap();
+            let Some(r) = map.get_mut(&code) else { return };
+            if !humans_online(r) || !bot_step(r) {
+                r.bot_pending = false;
+                return;
+            }
+            broadcast(r);
+        }
+    });
+}
+
+fn kick_bots(rooms: &Rooms, code: &str, r: &mut Room) {
+    if r.bot_pending || !humans_online(r) {
+        return;
+    }
+    let active = r.game.as_ref().map_or(false, |g| g.phase != Phase::Over);
+    if !active {
+        return;
+    }
+    r.bot_pending = true;
+    spawn_bots(rooms.clone(), code.to_string());
+}
+
+/// Kirim state terbaru ke semua pemain, lalu jalankan bot kalau perlu.
+fn push(rooms: &Rooms, code: &str, r: &mut Room) {
+    broadcast(r);
+    kick_bots(rooms, code, r);
+}
+
 fn apply(r: &mut Room, seat: usize, action: Action) -> Result<(), String> {
+    if r.game_over {
+        return Err("Permainan sudah selesai".to_string());
+    }
     match r.game.as_mut() {
         Some(g) => g.apply(seat, action).map_err(|e| format!("{e:?}")),
         None => Err("Game belum dimulai".to_string()),
     }
-}
-
-fn all_offline(r: &Room) -> bool {
-    r.seats.iter().all(|s| s.as_ref().map_or(true, |s| s.tx.is_none()))
 }
 
 fn to_text(msg: &ServerMsg) -> Message {
@@ -203,30 +392,52 @@ async fn handle_socket(socket: WebSocket, rooms: Rooms, q: JoinQuery) {
         Err("Kode room kosong")
     } else {
         let mut map = rooms.lock().unwrap();
-        let r = map.entry(code.clone()).or_default();
+        let is_new = !map.contains_key(&code);
 
-        let existing = q.token.as_ref().and_then(|t| {
-            r.seats
-                .iter()
-                .position(|s| s.as_ref().map_or(false, |s| &s.token == t))
-        });
-
-        if let Some(i) = existing {
-            let s = r.seats[i].as_mut().unwrap();
-            s.tx = Some(tx.clone());
-            Ok((i, s.token.clone()))
-        } else if r.game.is_some() {
-            Err("Permainan di room ini sudah berjalan")
-        } else if let Some(i) = r.seats.iter().position(|s| s.is_none()) {
-            let token = q
-                .token
-                .clone()
-                .filter(|t| (16..=64).contains(&t.len()))
-                .unwrap_or_else(new_token);
-            r.seats[i] = Some(Seat { token: token.clone(), name, tx: Some(tx.clone()) });
-            Ok((i, token))
+        if is_new && map.len() >= MAX_ROOMS {
+            Err("Server penuh, coba lagi nanti")
         } else {
-            Err("Room penuh")
+            let limit = q.limit.unwrap_or(0).clamp(0, 10_000);
+            let limit = if limit > 0 { limit.max(50) } else { 0 };
+            let public = q.public.as_deref() == Some("1");
+
+            let r = map.entry(code.clone()).or_insert_with(|| Room {
+                public,
+                score_limit: limit,
+                ..Default::default()
+            });
+
+            let existing = q.token.as_ref().and_then(|t| {
+                r.seats
+                    .iter()
+                    .position(|s| s.as_ref().map_or(false, |s| !s.bot && &s.token == t))
+            });
+
+            if let Some(i) = existing {
+                let s = r.seats[i].as_mut().unwrap();
+                s.tx = Some(tx.clone());
+                Ok((i, s.token.clone()))
+            } else if r.game.is_some() {
+                Err("Permainan di room ini sudah berjalan")
+            } else if let Some(i) = r.seats.iter().position(|s| s.is_none()) {
+                if r.seats.iter().all(|s| s.is_none()) {
+                    r.host = i; // pemain pertama = pembuat room
+                }
+                let token = q
+                    .token
+                    .clone()
+                    .filter(|t| (16..=64).contains(&t.len()))
+                    .unwrap_or_else(new_token);
+                r.seats[i] = Some(Seat {
+                    token: token.clone(),
+                    name,
+                    tx: Some(tx.clone()),
+                    bot: false,
+                });
+                Ok((i, token))
+            } else {
+                Err("Room penuh")
+            }
         }
     };
 
@@ -265,7 +476,7 @@ async fn handle_socket(socket: WebSocket, rooms: Rooms, q: JoinQuery) {
     {
         let mut map = rooms.lock().unwrap();
         if let Some(r) = map.get_mut(&code) {
-            broadcast(r);
+            push(&rooms, &code, r);
         }
     }
 
@@ -277,9 +488,36 @@ async fn handle_socket(socket: WebSocket, rooms: Rooms, q: JoinQuery) {
 
         let result = match serde_json::from_str::<ClientMsg>(&text) {
             Err(_) => Err("Pesan tidak dikenali".to_string()),
+            Ok(ClientMsg::Ping) => continue,
+            Ok(ClientMsg::StartGame { .. }) => {
+                let joined = r.seats.iter().filter(|s| s.is_some()).count();
+                if r.game.is_some() {
+                    Err("Permainan sudah dimulai".to_string())
+                } else if seat != r.host {
+                    Err("Hanya pembuat room yang bisa memulai".to_string())
+                } else if joined < 2 {
+                    Err("Minimal 2 pemain untuk memulai".to_string())
+                } else {
+                    // kursi kosong diisi bot
+                    for i in 0..PLAYERS {
+                        if r.seats[i].is_none() {
+                            r.seats[i] = Some(Seat {
+                                token: String::new(),
+                                name: format!("Bot {}", i + 1),
+                                tx: None,
+                                bot: true,
+                            });
+                        }
+                    }
+                    start_round(r);
+                    Ok(())
+                }
+            }
             Ok(ClientMsg::NextRound) => {
                 let over = r.game.as_ref().map_or(false, |g| g.phase == Phase::Over);
-                if over {
+                if r.game_over {
+                    Err("Permainan sudah selesai".to_string())
+                } else if over {
                     start_round(r);
                     Ok(())
                 } else {
@@ -291,16 +529,16 @@ async fn handle_socket(socket: WebSocket, rooms: Rooms, q: JoinQuery) {
                 apply(r, seat, Action::Extend { series, cards })
             }
             Ok(ClientMsg::Kill { cards }) => apply(r, seat, Action::Kill { cards }),
-            Ok(ClientMsg::Revive { set, dead, helper, series }) => {
-                apply(r, seat, Action::Revive { set, dead, helper, series })
-            }
             Ok(ClientMsg::AddDead { set, cards }) => {
                 apply(r, seat, Action::AddDead { set, cards })
+            }
+            Ok(ClientMsg::ReviveDead { set, jokers }) => {
+                apply(r, seat, Action::ReviveDead { set, jokers })
             }
         };
 
         match result {
-            Ok(()) => broadcast(r),
+            Ok(()) => push(&rooms, &code, r),
             Err(message) => {
                 let _ = tx.send(ServerMsg::Error { message });
             }
@@ -322,10 +560,15 @@ async fn handle_socket(socket: WebSocket, rooms: Rooms, q: JoinQuery) {
             if is_current {
                 if r.game.is_none() {
                     r.seats[seat] = None; // belum mulai: bebaskan kursi
+                    if seat == r.host {
+                        if let Some(n) = r.seats.iter().position(|s| s.is_some()) {
+                            r.host = n; // pembuat room pindah ke pemain lain
+                        }
+                    }
                 } else if let Some(s) = r.seats[seat].as_mut() {
-                    s.tx = None; // sudah mulai: pertahankan kursi
+                    s.tx = None; // sudah mulai: pertahankan kursi, bot menggantikan sementara
                 }
-                broadcast(r);
+                push(&rooms, &code, r);
                 offline = all_offline(r);
                 started = r.game.is_some();
             }
