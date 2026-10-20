@@ -6,7 +6,9 @@
   pointer-events: none; will-change: transform; filter: drop-shadow(0 4px 6px rgba(0,0,0,.5));
 }
 
-.splat { position: fixed; width: 0; height: 0; pointer-events: none; }
+/* efek kena menempel di avatar target (avatar harus position: relative) */
+.avatar { position: relative; }
+.splat-anchor { position: absolute; left: 50%; top: 50%; z-index: 30; width: 0; height: 0; pointer-events: none; }
 .splat-in {
   display: flex; flex-direction: column; align-items: center; width: 140px; margin-left: -70px; margin-top: -34px;
   transform-origin: center; animation: tsplat 1.1s ease-out forwards;
@@ -28,12 +30,12 @@
 }
 
 /* efek kena pada avatar target */
-.hit-banana { animation: tslip .9s ease-out; }
-.hit-tomato, .hit-egg { animation: tsquash .6s ease-out; }
-.hit-sandal, .hit-poop { animation: tshake .6s ease-in-out; }
-.hit-tomato { box-shadow: 0 0 0 3px #ff3b30, 0 0 22px #ff3b30; }
-.hit-egg { box-shadow: 0 0 0 3px #ffd43b, 0 0 22px #ffd43b; }
-.hit-poop { box-shadow: 0 0 0 3px #8b5a2b, 0 0 22px #8b5a2b; }
+.avatar.hit-banana { animation: tslip .9s ease-out; }
+.avatar.hit-tomato, .avatar.hit-egg { animation: tsquash .6s ease-out; }
+.avatar.hit-sandal, .avatar.hit-poop { animation: tshake .6s ease-in-out; }
+.avatar.hit-tomato { box-shadow: 0 0 0 3px #ff3b30, 0 0 22px #ff3b30; }
+.avatar.hit-egg { box-shadow: 0 0 0 3px #ffd43b, 0 0 22px #ffd43b; }
+.avatar.hit-poop { box-shadow: 0 0 0 3px #8b5a2b, 0 0 22px #8b5a2b; }
 @keyframes tslip {
   0% { transform: none; }
   25% { transform: translate(-10px, -12px) rotate(-40deg); }
@@ -95,5 +97,5 @@
 @keyframes tmenu { from { opacity: 0; transform: translateY(8px); } }
 
 @media (prefers-reduced-motion: reduce) {
-  .hit-banana, .hit-tomato, .hit-egg, .hit-sandal, .hit-poop { animation: none; }
+  .avatar.hit-banana, .avatar.hit-tomato, .avatar.hit-egg, .avatar.hit-sandal, .avatar.hit-poop { animation: none; }
 }

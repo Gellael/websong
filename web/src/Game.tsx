@@ -3,7 +3,13 @@ import { useGameSocket } from './useGameSocket'
 import { CardView, CardBack } from './CardView'
 import { MusicToggle } from './MusicToggle'
 import { TauntLayer, TauntTray } from './TauntUI'
-import { TAUNT_COOLDOWN_MS, type TauntKind, type TauntMsg } from './tauntTypes'
+import {
+  SPLAT_EMOJI,
+  TAUNT_COOLDOWN_MS,
+  TAUNT_EMOJI,
+  type TauntKind,
+  type TauntMsg,
+} from './tauntTypes'
 import { sfx } from './audio'
 import {
   addDeadOptions,
@@ -31,21 +37,42 @@ function sortHand(hand: Card[], mode: SortMode): Card[] {
   return [...hand].sort((a, b) => key(a) - key(b) || a.id - b.id)
 }
 
-/** seat dipakai animasi lemparan untuk mencari posisi avatar di layar. */
+interface AvatarHit {
+  id: string
+  kind: TauntKind
+  name: string // nama pelempar
+}
+
+/**
+ * seat dipakai animasi lemparan untuk mencari avatar di layar.
+ * hit: efek kena (terpeleset, penyok, dll) yang menempel langsung di avatar.
+ */
 function Avatar({
   name,
   color,
   bot,
   seat,
+  hit,
 }: {
   name: string
   color: string
   bot?: boolean
   seat?: number
+  hit?: AvatarHit
 }) {
   return (
-    <div className="avatar" style={cv(color)} data-seat={seat}>
+    <div className={`avatar ${hit ? `hit-${hit.kind}` : ''}`} style={cv(color)} data-seat={seat}>
       {bot ? '🤖' : (name || '?').charAt(0).toUpperCase()}
+      {hit && (
+        <span key={hit.id} className={`splat-anchor splat-${hit.kind}`}>
+          <span className="splat-in">
+            <i>{SPLAT_EMOJI[hit.kind]}</i>
+            <b>
+              {hit.name} {TAUNT_EMOJI[hit.kind]}
+            </b>
+          </span>
+        </span>
+      )}
     </div>
   )
 }
@@ -111,6 +138,21 @@ export default function Game({
   const [copied, setCopied] = useState<string | null>(null)
   const [weapon, setWeapon] = useState<TauntKind | null>(null)
   const [cooling, setCooling] = useState(false)
+  // efek kena yang sedang tampil di tiap kursi (kursi -> lemparan terakhir)
+  const [hits, setHits] = useState<Record<number, TauntMsg>>({})
+  const hitTimers = useRef<Record<number, number>>({})
+
+  const handleHit = (t: TauntMsg) => {
+    setHits((h) => ({ ...h, [t.to]: t }))
+    window.clearTimeout(hitTimers.current[t.to])
+    hitTimers.current[t.to] = window.setTimeout(() => {
+      setHits((h) => {
+        const n = { ...h }
+        delete n[t.to]
+        return n
+      })
+    }, 1300)
+  }
 
   const phase = view?.phase
   const turn = view?.turn
@@ -158,6 +200,10 @@ export default function Game({
 
   // nama untuk label lemparan: di ruang tunggu namanya ada di `waiting`, di meja ada di `names`
   const layerNames = view ? names : (waiting?.names ?? names)
+  const hitOf = (i: number): AvatarHit | undefined => {
+    const h = hits[i]
+    return h ? { id: h.id, kind: h.kind, name: layerNames[h.from] || 'Pemain' } : undefined
+  }
 
   /* ---------------- gagal masuk ---------------- */
   if (joinError) {
@@ -216,7 +262,7 @@ export default function Game({
                   style={cv(COLORS[i])}
                   onClick={canHit ? () => throwAt(i) : undefined}
                 >
-                  <Avatar name={n} color={COLORS[i]} seat={n ? i : undefined} />
+                  <Avatar name={n} color={COLORS[i]} seat={n ? i : undefined} hit={hitOf(i)} />
                   <div className="pname">
                     {n || 'menunggu…'}
                     {i === waiting?.seat ? ' (kamu)' : ''}
@@ -254,7 +300,7 @@ export default function Game({
           <button type="button" className="btn ghost" onClick={onLeave}>Keluar</button>
         </main>
 
-        <TauntLayer taunts={flying} names={layerNames} onDone={finishTaunt} />
+        <TauntLayer taunts={flying} onHit={handleHit} onDone={finishTaunt} />
         <TauntTray weapon={weapon} cooling={cooling} onPick={setWeapon} />
       </div>
     )
@@ -408,7 +454,7 @@ export default function Game({
               onClick={weapon ? () => throwAt(i) : undefined}
             >
               <div className="opp-head">
-                <Avatar name={names[i]} color={COLORS[i]} bot={isBot} seat={i} />
+                <Avatar name={names[i]} color={COLORS[i]} bot={isBot} seat={i} hit={hitOf(i)} />
                 <div className="opp-name">
                   <div className="pname">
                     {nm(i)} {isBot && <span className="botbadge">BOT</span>}
@@ -489,7 +535,7 @@ export default function Game({
 
       {/* kamu */}
       <section className={`mebar ${canAct ? 'mine' : ''}`} style={cv(COLORS[me])}>
-        <Avatar name={myName} color={COLORS[me]} seat={me} />
+        <Avatar name={myName} color={COLORS[me]} seat={me} hit={hitOf(me)} />
         <div className="mebar-text">
           <div className="pname">
             {myName} <span className="muted">· {totals[me]} poin{scoreLimit > 0 ? ` / ${scoreLimit}` : ''}</span>
@@ -593,7 +639,7 @@ export default function Game({
         </div>
       )}
 
-      <TauntLayer taunts={flying} names={layerNames} onDone={finishTaunt} />
+      <TauntLayer taunts={flying} onHit={handleHit} onDone={finishTaunt} />
       <TauntTray weapon={weapon} cooling={cooling} onPick={setWeapon} />
     </div>
   )

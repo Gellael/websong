@@ -1,23 +1,26 @@
 import { useEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
-import { SPLAT_EMOJI, TAUNTS, TAUNT_EMOJI, type TauntKind, type TauntMsg } from './tauntTypes'
+import { TAUNTS, TAUNT_EMOJI, type TauntKind, type TauntMsg } from './tauntTypes'
 import './taunt.css'
 
 const prefersReducedMotion = () =>
   typeof window !== 'undefined' && !!window.matchMedia?.('(prefers-reduced-motion: reduce)').matches
 
-/** Satu lemparan: terbang dari avatar pelempar ke avatar target, lalu efek kena. */
+/**
+ * Satu lemparan: proyektil terbang dari avatar pelempar ke avatar target.
+ * Efek kena TIDAK digambar di sini: setelah mendarat, onHit memberi tahu Game,
+ * dan avatar target sendiri yang menampilkannya (menempel di avatar, jadi posisinya selalu tepat).
+ */
 function Projectile({
   t,
-  name,
+  onHit,
   onDone,
 }: {
   t: TauntMsg
-  name: string
+  onHit: (t: TauntMsg) => void
   onDone: (id: string) => void
 }) {
   const ref = useRef<HTMLSpanElement>(null)
-  const [splat, setSplat] = useState<{ x: number; y: number } | null>(null)
 
   useEffect(() => {
     const el = ref.current
@@ -37,10 +40,6 @@ function Projectile({
     const mx = (sx + tx) / 2
     const my = Math.min(sy, ty) - 90
 
-    const hitClass = `hit-${t.kind}`
-    let hitTimer: number | undefined
-    let doneTimer: number | undefined
-
     el.style.visibility = 'visible'
     const anim = el.animate(
       [
@@ -59,34 +58,15 @@ function Projectile({
     )
 
     anim.onfinish = () => {
-      setSplat({ x: tx, y: ty })
-      target.classList.add(hitClass)
-      hitTimer = window.setTimeout(() => target.classList.remove(hitClass), 950)
-      doneTimer = window.setTimeout(() => onDone(t.id), 1200)
+      onHit(t)
+      onDone(t.id)
     }
 
-    return () => {
-      anim.cancel()
-      window.clearTimeout(hitTimer)
-      window.clearTimeout(doneTimer)
-      target.classList.remove(hitClass)
-    }
+    return () => anim.cancel()
     // satu efek per lemparan; id-nya unik
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
-  if (splat) {
-    return (
-      <span className={`splat splat-${t.kind}`} style={{ left: splat.x, top: splat.y }}>
-        <span className="splat-in">
-          <i>{SPLAT_EMOJI[t.kind]}</i>
-          <b>
-            {name} {TAUNT_EMOJI[t.kind]}
-          </b>
-        </span>
-      </span>
-    )
-  }
   return (
     <span ref={ref} className="proj" style={{ visibility: 'hidden' }}>
       {TAUNT_EMOJI[t.kind]}
@@ -94,21 +74,21 @@ function Projectile({
   )
 }
 
-/** Lapisan di atas layar tempat semua lemparan beranimasi. */
+/** Lapisan di atas layar tempat proyektil beranimasi. */
 export function TauntLayer({
   taunts,
-  names,
+  onHit,
   onDone,
 }: {
   taunts: TauntMsg[]
-  names: string[]
+  onHit: (t: TauntMsg) => void
   onDone: (id: string) => void
 }) {
   // dirender langsung di <body> supaya tidak terpengaruh transform/overflow elemen induk di HP
   return createPortal(
     <div className="taunt-layer" aria-hidden>
       {taunts.map((t) => (
-        <Projectile key={t.id} t={t} name={names[t.from] || 'Pemain'} onDone={onDone} />
+        <Projectile key={t.id} t={t} onHit={onHit} onDone={onDone} />
       ))}
     </div>,
     document.body,
