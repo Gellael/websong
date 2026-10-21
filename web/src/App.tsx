@@ -117,10 +117,13 @@ export default function App() {
           <div className="fcard c2 red"><b>K</b><span>♥</span></div>
           <div className="fcard c3"><b>Q</b><span>♣</span></div>
           <div className="fcard c4 red"><b>J</b><span>♦</span></div>
-          <div className="fcard c5 gold"><b>★</b><span>JKR</span></div>
+            <div className="fcard-cons golds c5s">
+            <img src="/logo.png" alt="Logo JKR" className="fcard-logo" />
+            <span className="fcard-text">JKR</span>
+            </div>
         </div>
 
-        <h1 className="hero-logo">Song</h1>
+        <h1 className="hero-logo" style={{ padding: '12px' }}>SongIn <a className='hero-links' target='_blank' href="https://instagram.com/kalibata.project"> <span className='hero-span'>By Kalibata Project</span> </a></h1>
         <p className="tagline">Permainan kartu tradisional · 5 pemain · main bareng online</p>
 
         <div className="box">
