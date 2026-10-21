@@ -211,7 +211,7 @@ export default function Game({
       <div className="landing">
         <MusicToggle floating />
         <main className="screen center">
-          <h1 className="hero-logo small">Song</h1>
+          <h1 className="hero-logo small">SongIn</h1>
           <div className="box">
             <p className="error">{joinError}</p>
             <button type="button" className="btn big" onClick={onLeave}>Kembali</button>
@@ -414,6 +414,21 @@ export default function Game({
     }
   }
 
+  // Petunjuk (khusus HP): ujung-ujung tiap seri di meja.
+  // Contoh: seri 5-6-7 -> bisa disambung dengan 4 (depan) atau 8 (belakang). Joker tidak direkomendasikan.
+  const POS_MIN = 1
+  const POS_MAX = 14
+  const laneHints: string[][] = view.table.map((s) => {
+    if (!myTurn || s.cards.length === 0) return []
+    const poss = s.cards.map((p) => p.pos)
+    const lo = Math.min(...poss) - 1
+    const hi = Math.max(...poss) + 1
+    const out: string[] = []
+    if (lo >= POS_MIN) out.push(posLabel(lo))
+    if (hi <= POS_MAX) out.push(posLabel(hi))
+    return out
+  })
+
   const choose = (o: Option) => {
     if (o.kind === 'new') newSeries(o.cards)
     else if (o.kind === 'extend') extend(o.series!, o.cards)
@@ -440,7 +455,7 @@ export default function Game({
   return (
     <div className="screen game-screen">
       <header className="topbar">
-        <h1 className="hero-logo tiny">Song</h1>
+        <h1 className="hero-logo2 tiny">SongIn</h1>
         <button type="button" className="roomtag" onClick={() => copy(room, 'code')} title="Salin kode room">
           Room <b>{room}</b> {copied === 'code' ? '✓' : ''}
         </button>
@@ -513,6 +528,20 @@ export default function Game({
                     <CardView key={p.card.id} card={p.card} pos={p.pos} small />
                   ))}
                 </div>
+                {myTurn && (
+                  <div className="lane-hint">
+                    <span className="lane-hint-title">Butuh</span>
+                    {laneHints[idx].length === 0 ? (
+                      <span className="lane-hint-none">-</span>
+                    ) : (
+                      <div className="lane-hint-chips">
+                        {laneHints[idx].map((l) => (
+                          <span key={l} className="lane-hint-chip">{l}</span>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                )}
               </div>
             ))
           )}

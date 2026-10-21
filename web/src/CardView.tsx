@@ -14,7 +14,15 @@ export function CardView({ card, pos, selected, small, onClick }: Props) {
   const realJoker = card.suit === 'Joker'
   const red = card.suit === 'Diamonds' || card.suit === 'Hearts'
   const label = pos !== undefined ? posLabel(pos) : realJoker ? 'JKR' : posLabel(card.rank)
-  const pip = realJoker || (joker && pos !== undefined) ? '★' : SUIT_SYMBOL[card.suit]
+  // Joker asli, atau joker yang sedang menggantikan posisi di meja: satu logo di tengah, bukan ★.
+  // Angka/huruf di pojok (label) tidak diubah: tetap angka yang digantikan joker.
+  const showLogo = realJoker || (joker && pos !== undefined)
+  const pip = showLogo ? null : SUIT_SYMBOL[card.suit]
+  const centerPip = showLogo ? (
+    <img src="/logo.png" alt="Logo JKR" className="joker-logo" draggable={false} />
+  ) : (
+    pip
+  )
 
   return (
     <button
@@ -30,12 +38,12 @@ export function CardView({ card, pos, selected, small, onClick }: Props) {
     >
       <span className="corner">
         <b>{label}</b>
-        <i>{pip}</i>
+        {pip && <i>{pip}</i>}
       </span>
-      <span className="pip">{pip}</span>
+      <span className="pip">{centerPip}</span>
       <span className="corner br">
         <b>{label}</b>
-        <i>{pip}</i>
+        {pip && <i>{pip}</i>}
       </span>
     </button>
   )

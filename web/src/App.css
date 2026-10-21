@@ -50,6 +50,12 @@ button { font-family: inherit; }
   filter: drop-shadow(0 4px 18px rgba(245,197,66,.35)); display: flex; justify-content: center; align-items: end; 
 }
 
+.hero-logo2 {
+  margin: 3px 0 0; font-family: 'Playfair Display', serif; font-size: 84px; line-height: 1;
+  background: linear-gradient(180deg, var(--gold2), var(--gold) 60%, #c98e0e);
+  -webkit-background-clip: text; background-clip: text; color: transparent;
+  filter: drop-shadow(0 4px 18px rgba(245,197,66,.35)); display: flex; justify-content: center; align-items: end; padding-bottom: 5px;
+}
 .hero-span{
   font-size: 10px;
   padding: 2px;
@@ -64,6 +70,8 @@ button { font-family: inherit; }
 }
 .hero-logo.small { font-size: 48px; }
 .hero-logo.tiny { font-size: 32px; margin: 0; }
+.hero-logo2.tiny { font-size: 32px; margin: 0; }
+
 
 .btn {
   padding: 11px 24px; font-size: 15px; font-weight: 700; cursor: pointer; color: #3a2a00; border: none; border-radius: 999px;
@@ -198,6 +206,8 @@ button { font-family: inherit; }
 /* ---------- meja ---------- */
 .topbar { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; }
 .topbar .hero-logo { margin-right: auto; }
+.topbar .hero-logo2 { margin-right: auto; }
+
 .roomtag { padding: 5px 14px; font-size: 13px; color: var(--text); background: var(--panel); border: 1px solid var(--line); border-radius: 999px; }
 button.roomtag { cursor: pointer; }
 .roomtag b { font-family: monospace; font-size: 15px; letter-spacing: 3px; color: var(--gold2); }
@@ -334,9 +344,13 @@ button.roomtag { cursor: pointer; }
 .cf { position: absolute; top: -20px; width: 9px; height: 14px; opacity: .9; animation: fall linear forwards; }
 @keyframes fall { to { transform: translateY(110vh) rotate(720deg); } }
 
+/* ---------- petunjuk kartu yang bisa dipasang per seri (hanya HP) ---------- */
+.lane-hint { display: none; }
+
 /* ---------- HP ---------- */
 @media (max-width: 700px) {
   .hero-logo { font-size: 64px; }
+  .hero-logo2 { font-size: 64px; }
   .fan { transform: scale(.85); }
   .opponents { grid-template-columns: repeat(2, 1fr); }
   .card { width: 54px; height: 80px; }
@@ -350,6 +364,13 @@ button.roomtag { cursor: pointer; }
   .mebar { flex-wrap: wrap; }
   .waittable { height: 300px; }
   .pod { width: 84px; }
+  .lane { gap: 8px; padding: 4px 8px; }
+  .lane-cards { flex: 1; min-width: 0; }
+  .lane-hint { display: flex; flex: none; flex-direction: column; align-items: center; gap: 2px; padding-left: 6px; border-left: 1px solid rgba(255,255,255,.15); }
+  .lane-hint-title { font-size: 9px; line-height: 1; opacity: .7; }
+  .lane-hint-chip { min-width: 20px; padding: 1px 6px; font-size: 12px; font-weight: 800; line-height: 1.3; text-align: center; color: #0b2a47; background: #4dabf7; border-radius: 999px; }
+  .lane-hint-chips { display: flex; gap: 3px; }
+  .lane-hint-none { font-size: 10px; opacity: .5; }
 }
 
 /* ---------- tombol musik ---------- */
@@ -382,4 +403,16 @@ button.roomtag { cursor: pointer; }
   height: 104px;
   object-fit: contain;
   display: block;
+}
+
+
+.card .pip { line-height: 0; }
+.card .joker-logo {
+  display: block;
+  width: 1.5em;   /* ubah angka ini untuk memperbesar / memperkecil logo */
+  height: 1.5em;
+  object-fit: contain;
+  filter: brightness(0);   /* ubah logo putih menjadi hitam */
+  pointer-events: none;
+  user-select: none;
 }

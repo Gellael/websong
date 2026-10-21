@@ -266,7 +266,7 @@ export default function App() {
             <li>Setiap giliran, lakukan satu aksi: seri baru, sambung seri di meja (1–2 kartu), matikan 3–5 kartu seangka, atau tambah kartu ke set mati.</li>
             <li>Habiskan kartu dengan seri baru untuk <b>Song</b> (−100), atau dengan cara lain untuk <b>Leng</b> (−50).</li>
             <li>Pemain yang tidak punya langkah otomatis mati, sisa kartunya jadi poin (maks 75). Skor terkecil menang.</li>
-            <li>Joker ★ dan As Sekop (A♠) bisa menggantikan kartu apa pun.</li>
+            <li>Joker (Logo Kalibata) dan As Sekop (A♠) bisa menggantikan kartu apa pun.</li>
           </ul>
         </details>
 
