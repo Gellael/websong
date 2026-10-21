@@ -21,6 +21,7 @@ pub enum GameError {
     BadSet,
     NoSuchSet,
     SetAlreadyRevived,
+    RankLocked, // rank ini sudah dimatikan: isi ke set mati, bukan ke seri
 }
 
 /// Kartu beserta posisinya di dalam seri (1..=14, A bisa 1 atau 14).
@@ -169,22 +170,107 @@ pub fn can_open(hand: &[Card]) -> bool {
     false
 }
 
-/// Apakah ada minimal satu kartu yang bisa disambung ke seri di meja?
-pub fn can_extend(hand: &[Card], table: &[Series]) -> bool {
-    let has_joker = hand.iter().any(|c| c.is_joker());
+/// Rank yang sedang "dimatikan": ada set mati dengan rank itu yang belum dihidupkan lagi.
+pub fn locked_ranks(sets: &[DeadSet]) -> Vec<u8> {
+    sets.iter().filter(|s| !s.revived).map(|s| s.rank).collect()
+}
+
+pub fn is_locked(sets: &[DeadSet], rank: u8) -> bool {
+    sets.iter().any(|s| !s.revived && s.rank == rank)
+}
+
+/// Aturan rank terkunci untuk Extend: kalau rank sudah dimatikan, kartu aslinya TIDAK boleh
+/// disambung sendirian (1 kartu) ke seri. Menyambung 2 kartu sekaligus (mis. J+K atau K+A)
+/// dan membuat seri baru tetap boleh. Joker / A♠ tidak pernah terkunci.
+pub fn check_extend_lock(cards: &[Placed], sets: &[DeadSet]) -> Result<(), GameError> {
+    if let [p] = cards {
+        if !p.card.is_joker() && is_locked(sets, p.card.rank) {
+            return Err(GameError::RankLocked);
+        }
+    }
+    Ok(())
+}
+
+/// Semua pola posisi yang mungkin untuk menyambung seri dengan 1 atau 2 kartu.
+pub fn extend_positions(s: &Series) -> Vec<Vec<u8>> {
+    let (lo, hi) = (s.lo(), s.hi());
+    let mut out: Vec<Vec<u8>> = Vec::new();
+    if lo > 1 {
+        out.push(vec![lo - 1]);
+    }
+    if hi < 14 {
+        out.push(vec![hi + 1]);
+    }
+    if lo > 2 {
+        out.push(vec![lo - 2, lo - 1]);
+    }
+    if hi < 13 {
+        out.push(vec![hi + 1, hi + 2]);
+    }
+    if lo > 1 && hi < 14 {
+        out.push(vec![lo - 1, hi + 1]);
+    }
+    out
+}
+
+/// Kartu asli (bukan joker) dengan jenis dan posisi tertentu yang belum dipakai.
+/// Rank di `avoid` dilewati.
+fn natural(hand: &[Card], used: &[u8], avoid: &[u8], suit: Suit, pos: u8) -> Option<Card> {
+    let rank = if pos == 14 { 1 } else { pos };
+    hand.iter().copied().find(|c| {
+        !c.is_joker()
+            && c.suit == suit
+            && c.rank == rank
+            && !used.contains(&c.id)
+            && !avoid.contains(&c.rank)
+    })
+}
+
+/// Isi posisi-posisi untuk jenis `suit`: kartu asli kalau ada, joker kalau tidak.
+/// None kalau joker kurang (atau tidak ada kartu asli padahal dibutuhkan).
+/// `avoid` = rank yang tidak boleh dipakai sebagai kartu asli (rank terkunci).
+pub fn fill(
+    hand: &[Card],
+    suit: Suit,
+    positions: &[u8],
+    avoid: &[u8],
+    need_natural: bool,
+) -> Option<Vec<Placed>> {
+    let mut used: Vec<u8> = Vec::new();
+    let mut spare: Vec<Card> = hand.iter().copied().filter(|c| c.is_joker()).collect();
+    let mut out = Vec::with_capacity(positions.len());
+    let mut naturals = 0;
+    for &pos in positions {
+        if let Some(card) = natural(hand, &used, avoid, suit, pos) {
+            used.push(card.id);
+            naturals += 1;
+            out.push(Placed { card, pos });
+        } else {
+            let card = spare.pop()?;
+            out.push(Placed { card, pos });
+        }
+    }
+    if need_natural && naturals == 0 {
+        return None;
+    }
+    Some(out)
+}
+
+/// Apakah ada minimal satu cara menyambung seri di meja (sesuai aturan rank terkunci)?
+pub fn can_extend(hand: &[Card], table: &[Series], sets: &[DeadSet]) -> bool {
+    let locked = locked_ranks(sets);
     table.iter().any(|s| {
-        let ends = [
-            (s.lo() > 1).then(|| s.lo() - 1),
-            (s.hi() < 14).then(|| s.hi() + 1),
-        ];
-        ends.iter()
-            .flatten()
-            .any(|&pos| has_joker || natural_at(hand, s.suit, pos))
+        extend_positions(s).iter().any(|positions| {
+            let avoid: &[u8] = if positions.len() == 1 { &locked } else { &[] };
+            fill(hand, s.suit, positions, avoid, false).is_some()
+        })
     })
 }
 
 /// Kartu mati: 3..=5 kartu seangka (jenis bebas) yang sudah diturunkan.
-/// Kalau ada Joker yang ditukar, kartu asli dibuang dan set ditandai `revived`.
+/// Selama set belum `revived`, rank-nya "terkunci": kartu rank itu hanya boleh masuk ke set ini
+/// (AddDead), atau dimainkan 2 kartu sekaligus / lewat seri baru. Memasang 1 Joker
+/// menghidupkan set (`revived`) dan membuka kunci rank-nya.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DeadSet {
     pub owner: usize,
@@ -210,10 +296,14 @@ pub fn build_dead_set(owner: usize, cards: &[Card]) -> Result<DeadSet, GameError
     Ok(DeadSet { owner, rank, cards: cards.to_vec(), revived: false })
 }
 
-/// Apakah tangan punya 3+ kartu seangka (joker boleh mengisi, minimal 1 kartu asli)?
-pub fn can_kill(hand: &[Card]) -> bool {
+/// Apakah tangan punya 3+ kartu seangka (joker boleh mengisi, minimal 1 kartu asli)
+/// pada rank yang belum dimatikan?
+pub fn can_kill(hand: &[Card], sets: &[DeadSet]) -> bool {
     let jokers = hand.iter().filter(|c| c.is_joker()).count();
     (1..=13u8).any(|rank| {
+        if is_locked(sets, rank) {
+            return false;
+        }
         let n = hand.iter().filter(|c| !c.is_joker() && c.rank == rank).count();
         n >= 1 && n + jokers >= 3
     })
@@ -221,6 +311,9 @@ pub fn can_kill(hand: &[Card]) -> bool {
 
 /// Tambah 1..=2 kartu seangka (joker boleh) ke set mati yang sudah ada.
 pub fn add_to_dead_set(set: &mut DeadSet, cards: &[Card]) -> Result<(), GameError> {
+    if set.revived {
+        return Err(GameError::SetAlreadyRevived);
+    }
     if !(1..=2).contains(&cards.len()) {
         return Err(GameError::BadSize);
     }
@@ -233,50 +326,31 @@ pub fn add_to_dead_set(set: &mut DeadSet, cards: &[Card]) -> Result<(), GameErro
 
 pub fn can_add_dead(hand: &[Card], sets: &[DeadSet]) -> bool {
     sets.iter()
+        .filter(|s| !s.revived)
         .any(|s| hand.iter().any(|c| c.is_joker() || c.rank == s.rank))
 }
 
-/// Tukar Joker dengan kartu asli di set mati.
-/// Kartu asli dikeluarkan dari set (akan dibuang ke dead_cards di game.rs).
-/// Set ditandai `revived` sehingga rank-nya bisa dimainkan ke seri lagi.
-/// Mengembalikan kartu-kartu asli yang dikeluarkan.
-pub fn revive_dead_set(set: &mut DeadSet, jokers: &[Card]) -> Result<Vec<Card>, GameError> {
+/// Hidupkan kembali set mati dengan memasang TEPAT 1 Joker (atau A♠) ke dalamnya.
+/// Kartu di set tidak berubah dan tidak ada yang kembali ke tangan; joker ikut menetap di set.
+/// Set ditandai `revived`, sehingga rank-nya boleh dimainkan lagi ke seri biasa.
+pub fn revive_dead_set(set: &mut DeadSet, jokers: &[Card]) -> Result<(), GameError> {
     if set.revived {
         return Err(GameError::SetAlreadyRevived);
     }
-    if jokers.is_empty() {
+    if jokers.len() != 1 {
         return Err(GameError::BadSize);
     }
-    if jokers.iter().any(|c| !c.is_joker()) {
-        return Err(GameError::NeedNatural); // harus semua Joker
+    if !jokers[0].is_joker() {
+        return Err(GameError::NeedNatural); // harus Joker
     }
-    // keluarkan semua kartu asli, ganti dengan joker-joker
-    let naturals: Vec<Card> = set.cards.iter().copied().filter(|c| !c.is_joker()).collect();
-    if naturals.is_empty() {
-        return Err(GameError::BadSet);
-    }
-    // butuh minimal sebanyak kartu asli di set
-    if jokers.len() < naturals.len() {
-        return Err(GameError::BadSize);
-    }
-    // ganti kartu asli dengan joker, pertahankan joker yang sudah ada
-    let existing_jokers: Vec<Card> = set.cards.iter().copied().filter(|c| c.is_joker()).collect();
-    set.cards = existing_jokers;
-    // tambahkan joker baru (sebanyak jumlah kartu asli yang diganti)
-    set.cards.extend_from_slice(&jokers[..naturals.len()]);
+    set.cards.push(jokers[0]);
     set.revived = true;
-    // kembalikan kartu asli yang dikeluarkan (akan dibuang ke dead_cards)
-    Ok(naturals)
+    Ok(())
 }
 
-/// Apakah pemain bisa melakukan revive pada salah satu set mati?
+/// Apakah pemain bisa menghidupkan salah satu set mati? (punya joker + ada set yang belum hidup)
 pub fn can_revive_dead(hand: &[Card], sets: &[DeadSet]) -> bool {
-    let joker_count = hand.iter().filter(|c| c.is_joker()).count();
-    sets.iter().any(|s| {
-        if s.revived { return false; }
-        let natural_count = s.cards.iter().filter(|c| !c.is_joker()).count();
-        joker_count >= natural_count && natural_count > 0
-    })
+    hand.iter().any(|c| c.is_joker()) && sets.iter().any(|s| !s.revived)
 }
 
 #[cfg(test)]
@@ -377,5 +451,100 @@ mod tests {
         assert!(can_open(&ok));
         let no = vec![c(5, Hearts, 0), c(9, Clubs, 1), c(12, Diamonds, 2)];
         assert!(!can_open(&no));
+    }
+
+    fn sample_dead(rank: u8) -> DeadSet {
+        build_dead_set(0, &[c(rank, Diamonds, 40), c(rank, Clubs, 41), c(rank, Hearts, 42)]).unwrap()
+    }
+
+    #[test]
+    fn killed_rank_blocks_only_single_card_extend() {
+        let sets = vec![sample_dead(13)];
+        assert!(is_locked(&sets, 13));
+        assert!(!is_locked(&sets, 12));
+        // 1 kartu K asli -> ditolak
+        assert_eq!(
+            check_extend_lock(&[pl(c(13, Hearts, 1), 13)], &sets),
+            Err(GameError::RankLocked)
+        );
+        // rank lain, joker, dan A♠ tidak terkunci
+        assert_eq!(check_extend_lock(&[pl(c(12, Hearts, 2), 12)], &sets), Ok(()));
+        assert_eq!(check_extend_lock(&[pl(c(14, Joker, 3), 13)], &sets), Ok(()));
+        assert_eq!(check_extend_lock(&[pl(c(1, Spades, 4), 13)], &sets), Ok(()));
+        // 2 kartu sekaligus (J+K / K+A) tetap boleh
+        assert_eq!(
+            check_extend_lock(&[pl(c(11, Hearts, 5), 11), pl(c(13, Hearts, 6), 13)], &sets),
+            Ok(())
+        );
+        assert_eq!(
+            check_extend_lock(&[pl(c(13, Hearts, 6), 13), pl(c(1, Hearts, 7), 14)], &sets),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn revive_needs_exactly_one_joker_and_unlocks_rank() {
+        let mut sets = vec![sample_dead(13)];
+        assert_eq!(revive_dead_set(&mut sets[0], &[]), Err(GameError::BadSize));
+        assert_eq!(
+            revive_dead_set(&mut sets[0], &[c(14, Joker, 5), c(14, Joker, 6)]),
+            Err(GameError::BadSize)
+        );
+        assert_eq!(revive_dead_set(&mut sets[0], &[c(5, Hearts, 7)]), Err(GameError::NeedNatural));
+        assert!(!sets[0].revived);
+        assert_eq!(sets[0].cards.len(), 3);
+
+        revive_dead_set(&mut sets[0], &[c(14, Joker, 5)]).unwrap();
+        assert!(sets[0].revived);
+        assert_eq!(sets[0].cards.len(), 4);
+        assert!(!is_locked(&sets, 13));
+        assert_eq!(
+            revive_dead_set(&mut sets[0], &[c(14, Joker, 6)]),
+            Err(GameError::SetAlreadyRevived)
+        );
+        assert_eq!(
+            add_to_dead_set(&mut sets[0], &[c(13, Clubs, 8)]),
+            Err(GameError::SetAlreadyRevived)
+        );
+    }
+
+    #[test]
+    fn move_checks_respect_dead_sets() {
+        let sets = vec![sample_dead(13)];
+        let kkk = vec![c(13, Hearts, 1), c(13, Clubs, 2), c(13, Spades, 3)];
+        assert!(can_kill(&kkk, &[]));
+        assert!(!can_kill(&kkk, &sets)); // K sudah dimatikan
+
+        assert!(can_add_dead(&[c(13, Hearts, 1)], &sets));
+        assert!(!can_add_dead(&[c(12, Hearts, 1)], &sets));
+        assert!(can_revive_dead(&[c(14, Joker, 5)], &sets));
+        assert!(!can_revive_dead(&[c(13, Hearts, 1)], &sets));
+
+        let mut revived = sets.clone();
+        revived[0].revived = true;
+        assert!(!can_add_dead(&[c(13, Hearts, 1)], &revived));
+        assert!(!can_revive_dead(&[c(14, Joker, 5)], &revived));
+        assert!(can_kill(&kkk, &revived)); // sudah hidup, rank bebas lagi
+    }
+
+    #[test]
+    fn can_extend_follows_rank_lock() {
+        let series = build_series(
+            0,
+            vec![pl(c(10, Hearts, 10), 10), pl(c(11, Hearts, 11), 11), pl(c(12, Hearts, 12), 12)],
+        )
+        .unwrap();
+        let table = vec![series];
+        let sets = vec![sample_dead(13)];
+
+        let only_k = vec![c(13, Hearts, 1)];
+        assert!(can_extend(&only_k, &table, &[]));
+        assert!(!can_extend(&only_k, &table, &sets)); // K sendirian terkunci
+
+        let k_and_a = vec![c(13, Hearts, 1), c(1, Hearts, 2)];
+        assert!(can_extend(&k_and_a, &table, &sets)); // K+A sekaligus boleh
+
+        let joker_only = vec![c(14, Joker, 3)];
+        assert!(can_extend(&joker_only, &table, &sets)); // joker mengisi pos K
     }
 }

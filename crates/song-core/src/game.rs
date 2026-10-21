@@ -8,6 +8,8 @@ use serde::{Deserialize, Serialize};
 pub const MAX_DEAD_SCORE: i32 = 75;
 /// Skor untuk pemain yang mati di awal (tidak bisa membuka seri).
 pub const OPENING_DEAD_SCORE: i32 = 100;
+/// Tambahan skor untuk pemain yang pertama kali mematikan kartu di ronde ini.
+pub const FIRST_KILL_PENALTY: i32 = 25;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Phase {
@@ -197,6 +199,7 @@ impl GameState {
             Action::Extend { series, cards } => {
                 check_in_hand(&self.hands[player], &cards)?;
                 let s = self.table.get_mut(series).ok_or(GameError::NoSuchSeries)?;
+                check_extend_lock(&cards, &self.sets)?;
                 extend_series(s, cards.clone())?;
                 remove_cards(&mut self.hands[player], &cards);
                 false
@@ -206,6 +209,9 @@ impl GameState {
                     cards.iter().map(|&card| Placed { card, pos: 0 }).collect();
                 check_in_hand(&self.hands[player], &wrapped)?;
                 let set = build_dead_set(player, &cards)?;
+                if is_locked(&self.sets, set.rank) {
+                    return Err(GameError::RankLocked); // rank ini sudah dimatikan: pakai AddDead
+                }
                 self.hands[player].retain(|c| !cards.iter().any(|k| k.id == c.id));
                 self.sets.push(set);
                 false
@@ -224,11 +230,9 @@ impl GameState {
                     jokers.iter().map(|&card| Placed { card, pos: 0 }).collect();
                 check_in_hand(&self.hands[player], &wrapped)?;
                 let ds = self.sets.get_mut(set).ok_or(GameError::NoSuchSet)?;
-                let freed = revive_dead_set(ds, &jokers)?;
-                // hapus joker dari tangan
+                revive_dead_set(ds, &jokers)?;
+                // joker pindah dari tangan ke set mati (tidak ada kartu yang kembali ke tangan)
                 self.hands[player].retain(|c| !jokers.iter().any(|k| k.id == c.id));
-                // kartu asli yang dibebaskan masuk ke tumpukan kartu mati (tidak dimainkan)
-                self.dead_cards.extend(freed);
                 false
             }
         };
@@ -266,9 +270,9 @@ impl GameState {
 
     fn has_move(&self, p: usize) -> bool {
         let h = &self.hands[p];
-        can_extend(h, &self.table)
+        can_extend(h, &self.table, &self.sets)
             || can_open(h)
-            || can_kill(h)
+            || can_kill(h, &self.sets)
             || can_add_dead(h, &self.sets)
             || can_revive_dead(h, &self.sets)
     }
@@ -296,6 +300,10 @@ impl GameState {
             } else {
                 hand_points(&self.hands[i]).min(MAX_DEAD_SCORE)
             };
+        }
+        // pemain yang pertama kali mematikan kartu di ronde ini kena tambahan poin
+        if let Some(first) = self.sets.first() {
+            scores[first.owner] += FIRST_KILL_PENALTY;
         }
         self.phase = Phase::Over;
         self.result = Some(RoundResult { outcome, winner, scores });
@@ -331,12 +339,18 @@ mod tests {
     use crate::Suit;
 
         fn opened_game(p0_extra: Vec<Card>) -> GameState {
+        opened_game_with(p0_extra, vec![])
+    }
+
+    fn opened_game_with(p0_extra: Vec<Card>, p1_extra: Vec<Card>) -> GameState {
         let mut p0 = vec![c(1, Hearts, 20), c(2, Hearts, 21), c(3, Hearts, 22)];
         p0.extend(p0_extra);
+        let mut p1 = vec![c(5, Hearts, 0), c(6, Hearts, 1), c(7, Hearts, 2), c(14, Joker, 26)];
+        p1.extend(p1_extra);
         let mut g = GameState::from_hands(
             [
                 p0,
-                vec![c(5, Hearts, 0), c(6, Hearts, 1), c(7, Hearts, 2), c(14, Joker, 26)],
+                p1,
                 vec![c(8, Clubs, 8), c(9, Clubs, 9), c(10, Clubs, 10), c(2, Spades, 11)],
                 vec![c(11, Diamonds, 12), c(12, Diamonds, 13), c(13, Diamonds, 14), c(2, Clubs, 15)],
                 vec![c(3, Spades, 16), c(4, Spades, 17), c(5, Spades, 18), c(6, Spades, 19)],
@@ -501,5 +515,102 @@ mod tests {
         let r = g.result.unwrap();
         assert_eq!(r.outcome, Outcome::Song);
         assert_eq!(r.scores, [-100, 25, 5, 5, 5]); // joker di tangan = 25
+    }
+
+    /// Giliran p1. p0 sudah mematikan J (set 0). Meja: seri 8-9-10 keriting ada di indeks 2.
+    fn locked_j_game() -> GameState {
+        let mut g = opened_game_with(
+            vec![c(11, Clubs, 30), c(11, Spades, 31), c(11, Diamonds, 32), c(6, Diamonds, 33)],
+            vec![c(11, Hearts, 34), c(12, Clubs, 35), c(11, Clubs, 36), c(9, Diamonds, 37)],
+        );
+        assert_eq!(g.turn, 0);
+        g.apply(0, Action::Kill { cards: vec![c(11, Clubs, 30), c(11, Spades, 31), c(11, Diamonds, 32)] })
+            .unwrap();
+        assert_eq!(g.turn, 1);
+        g
+    }
+
+    #[test]
+    fn killed_rank_cannot_be_killed_again_or_extended_alone() {
+        let mut g = locked_j_game();
+        let before = g.hands[1].len();
+
+        // J sendirian ke seri -> ditolak
+        assert_eq!(
+            g.apply(1, Action::Extend { series: 2, cards: vec![pl(c(11, Clubs, 36), 11)] }),
+            Err(GameError::RankLocked)
+        );
+        // mematikan J lagi -> ditolak (harus AddDead)
+        assert_eq!(
+            g.apply(1, Action::Kill {
+                cards: vec![c(11, Hearts, 34), c(11, Clubs, 36), c(14, Joker, 26)],
+            }),
+            Err(GameError::RankLocked)
+        );
+        assert_eq!(g.hands[1].len(), before);
+        assert_eq!(g.turn, 1);
+
+        // mengisi ke set mati J -> boleh
+        g.apply(1, Action::AddDead { set: 0, cards: vec![c(11, Hearts, 34)] }).unwrap();
+        assert_eq!(g.sets[0].cards.len(), 4);
+        assert_eq!(g.turn, 2);
+    }
+
+    #[test]
+    fn killed_rank_can_be_played_as_two_cards() {
+        let mut g = locked_j_game();
+        // J + Q sekaligus ke seri 8-9-10 -> boleh
+        g.apply(1, Action::Extend {
+            series: 2,
+            cards: vec![pl(c(11, Clubs, 36), 11), pl(c(12, Clubs, 35), 12)],
+        })
+        .unwrap();
+        assert_eq!((g.table[2].lo(), g.table[2].hi()), (8, 12));
+        assert_eq!(g.turn, 2);
+    }
+
+    #[test]
+    fn killed_rank_can_still_open_a_new_series() {
+        let mut g = locked_j_game();
+        // J♣-Q♣-(joker sbg K) = seri baru yang memuat J asli -> boleh
+        g.apply(1, Action::NewSeries {
+            cards: vec![
+                pl(c(11, Clubs, 36), 11),
+                pl(c(12, Clubs, 35), 12),
+                pl(c(14, Joker, 26), 13),
+            ],
+        })
+        .unwrap();
+        assert_eq!(g.table.len(), 6);
+        assert_eq!(g.turn, 2);
+    }
+
+    #[test]
+    fn one_joker_revives_dead_set_and_unlocks_rank() {
+        let mut g = locked_j_game();
+        assert!(is_locked(&g.sets, 11));
+        let before = g.hands[1].len();
+
+        g.apply(1, Action::ReviveDead { set: 0, jokers: vec![c(14, Joker, 26)] }).unwrap();
+        assert!(g.sets[0].revived);
+        assert_eq!(g.sets[0].cards.len(), 4); // 3 kartu J + joker
+        assert_eq!(g.hands[1].len(), before - 1); // joker pindah ke set, tidak ada kartu kembali ke tangan
+        assert!(!is_locked(&g.sets, 11));
+        assert_eq!(g.turn, 2);
+    }
+
+    #[test]
+    fn first_kill_costs_25_points() {
+        let mut g = opened_game(vec![
+            c(9, Clubs, 30), c(9, Spades, 31), c(9, Diamonds, 32), c(13, Clubs, 33),
+        ]);
+        g.apply(0, Action::Kill { cards: vec![c(9, Clubs, 30), c(9, Spades, 31), c(9, Diamonds, 32)] })
+            .unwrap();
+        // p1 menghabiskan kartu dengan menaruh joker ke set mati -> Leng
+        g.apply(1, Action::AddDead { set: 0, cards: vec![c(14, Joker, 26)] }).unwrap();
+        let r = g.result.unwrap();
+        assert_eq!(r.outcome, Outcome::Leng);
+        // p0: sisa K = 10 poin + 25 penalti kill pertama
+        assert_eq!(r.scores, [35, -50, 5, 5, 5]);
     }
 }

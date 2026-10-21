@@ -5,8 +5,11 @@
 //! memakai aturan asli (`GameState::apply`), jadi bot tidak mungkin mengirim langkah
 //! yang tidak sah, dan aturan tidak perlu ditulis ulang di sini.
 
-use crate::game::{Action, GameState, Outcome, Phase};
-use crate::series::{can_add_dead, can_extend, can_kill, can_open, can_revive_dead, DeadSet, Placed, Series};
+use crate::game::{Action, GameState, Outcome, Phase, FIRST_KILL_PENALTY};
+use crate::series::{
+    can_add_dead, can_extend, can_kill, can_open, can_revive_dead, extend_positions, fill,
+    is_locked, locked_ranks, DeadSet, Placed, Series,
+};
 use crate::{Card, Suit, PLAYERS};
 
 const SUITS: [Suit; 4] = [Suit::Diamonds, Suit::Clubs, Suit::Hearts, Suit::Spades];
@@ -14,50 +17,12 @@ const SUITS: [Suit; 4] = [Suit::Diamonds, Suit::Clubs, Suit::Hearts, Suit::Spade
 /// Joker yang dipakai dianggap "mahal": hanya dikeluarkan kalau memberi keuntungan jelas.
 const JOKER_COST: i32 = 20;
 
-fn rank_at(pos: u8) -> u8 {
-    if pos == 14 {
-        1
-    } else {
-        pos
-    }
-}
-
 fn points(hand: &[Card]) -> i32 {
     hand.iter().map(|c| c.points()).sum()
 }
 
 fn joker_count(hand: &[Card]) -> i32 {
     hand.iter().filter(|c| c.is_joker()).count() as i32
-}
-
-/// Kartu asli (bukan joker) dengan jenis dan posisi tertentu yang belum dipakai.
-fn natural(hand: &[Card], used: &[u8], suit: Suit, pos: u8) -> Option<Card> {
-    hand.iter().copied().find(|c| {
-        !c.is_joker() && c.suit == suit && c.rank == rank_at(pos) && !used.contains(&c.id)
-    })
-}
-
-/// Isi posisi-posisi untuk jenis `suit`: kartu asli kalau ada, joker kalau tidak.
-/// None kalau joker kurang (atau tidak ada kartu asli padahal dibutuhkan).
-fn fill(hand: &[Card], suit: Suit, positions: &[u8], need_natural: bool) -> Option<Vec<Placed>> {
-    let mut used: Vec<u8> = Vec::new();
-    let mut spare: Vec<Card> = hand.iter().copied().filter(|c| c.is_joker()).collect();
-    let mut out = Vec::with_capacity(positions.len());
-    let mut naturals = 0;
-    for &pos in positions {
-        if let Some(card) = natural(hand, &used, suit, pos) {
-            used.push(card.id);
-            naturals += 1;
-            out.push(Placed { card, pos });
-        } else {
-            let card = spare.pop()?;
-            out.push(Placed { card, pos });
-        }
-    }
-    if need_natural && naturals == 0 {
-        return None;
-    }
-    Some(out)
 }
 
 /// Semua seri baru (3..=5 kartu) yang bisa dibentuk dari tangan.
@@ -71,7 +36,7 @@ fn series_candidates(hand: &[Card]) -> Vec<Vec<Placed>> {
                     break;
                 }
                 let positions: Vec<u8> = (start..=end).collect();
-                if let Some(cards) = fill(hand, suit, &positions, true) {
+                if let Some(cards) = fill(hand, suit, &positions, &[], true) {
                     out.push(cards);
                 }
             }
@@ -81,28 +46,14 @@ fn series_candidates(hand: &[Card]) -> Vec<Vec<Placed>> {
 }
 
 /// Semua cara menyambung seri yang ada di meja dengan 1 atau 2 kartu.
-fn extend_candidates(hand: &[Card], table: &[Series]) -> Vec<(usize, Vec<Placed>)> {
+/// Rank yang sudah dimatikan tidak dipakai sebagai kartu asli kalau menyambung 1 kartu.
+fn extend_candidates(hand: &[Card], table: &[Series], sets: &[DeadSet]) -> Vec<(usize, Vec<Placed>)> {
+    let locked = locked_ranks(sets);
     let mut out = Vec::new();
     for (i, s) in table.iter().enumerate() {
-        let (lo, hi) = (s.lo(), s.hi());
-        let mut options: Vec<Vec<u8>> = Vec::new();
-        if lo > 1 {
-            options.push(vec![lo - 1]);
-        }
-        if hi < 14 {
-            options.push(vec![hi + 1]);
-        }
-        if lo > 2 {
-            options.push(vec![lo - 2, lo - 1]);
-        }
-        if hi < 13 {
-            options.push(vec![hi + 1, hi + 2]);
-        }
-        if lo > 1 && hi < 14 {
-            options.push(vec![lo - 1, hi + 1]);
-        }
-        for positions in options {
-            if let Some(cards) = fill(hand, s.suit, &positions, false) {
+        for positions in extend_positions(s) {
+            let avoid: &[u8] = if positions.len() == 1 { &locked } else { &[] };
+            if let Some(cards) = fill(hand, s.suit, &positions, avoid, false) {
                 out.push((i, cards));
             }
         }
@@ -111,7 +62,7 @@ fn extend_candidates(hand: &[Card], table: &[Series]) -> Vec<(usize, Vec<Placed>
 }
 
 /// Kartu mati: 3..=5 kartu seangka (joker boleh mengisi, minimal satu kartu asli).
-fn kill_candidates(hand: &[Card]) -> Vec<Vec<Card>> {
+fn kill_candidates(hand: &[Card], sets: &[DeadSet]) -> Vec<Vec<Card>> {
     let js: Vec<Card> = hand.iter().copied().filter(|c| c.is_joker()).collect();
     let mut out = Vec::new();
     for rank in 1..=13u8 {
@@ -120,7 +71,7 @@ fn kill_candidates(hand: &[Card]) -> Vec<Vec<Card>> {
             .copied()
             .filter(|c| !c.is_joker() && c.rank == rank)
             .collect();
-        if nat.is_empty() {
+        if nat.is_empty() || is_locked(sets, rank) {
             continue;
         }
         for size in 3..=5usize {
@@ -141,6 +92,9 @@ fn add_dead_candidates(hand: &[Card], sets: &[DeadSet]) -> Vec<(usize, Vec<Card>
     let first_joker = hand.iter().copied().find(|c| c.is_joker());
     let mut out = Vec::new();
     for (i, s) in sets.iter().enumerate() {
+        if s.revived {
+            continue;
+        }
         let fit: Vec<Card> = hand
             .iter()
             .copied()
@@ -159,17 +113,16 @@ fn add_dead_candidates(hand: &[Card], sets: &[DeadSet]) -> Vec<(usize, Vec<Card>
     out
 }
 
-/// Kandidat langkah revive: tukar joker-joker dari tangan ke set mati yang belum revived.
+/// Kandidat langkah revive: pasang 1 joker dari tangan ke set mati yang belum revived.
 fn revive_dead_candidates(hand: &[Card], sets: &[DeadSet]) -> Vec<(usize, Vec<Card>)> {
-    let jokers: Vec<Card> = hand.iter().copied().filter(|c| c.is_joker()).collect();
-    let mut out = Vec::new();
-    for (i, s) in sets.iter().enumerate() {
-        if s.revived { continue; }
-        let natural_count = s.cards.iter().filter(|c| !c.is_joker()).count();
-        if natural_count == 0 || jokers.len() < natural_count { continue; }
-        out.push((i, jokers[..natural_count].to_vec()));
-    }
-    out
+    let Some(joker) = hand.iter().copied().find(|c| c.is_joker()) else {
+        return Vec::new();
+    };
+    sets.iter()
+        .enumerate()
+        .filter(|(_, s)| !s.revived)
+        .map(|(i, _)| (i, vec![joker]))
+        .collect()
 }
 
 /// Nilai sebuah langkah (makin besar makin bagus). None kalau langkahnya tidak sah.
@@ -185,7 +138,7 @@ fn evaluate(before: &GameState, action: &Action, seat: usize) -> Option<i32> {
     // tapi hemat joker dan sisakan kemungkinan melangkah di fase main.
     if before.phase == Phase::Opening {
         let removed = points(&before.hands[seat]) - pts;
-        let future = can_open(hand) || can_kill(hand);
+        let future = can_open(hand) || can_kill(hand, &g.sets);
         return Some(removed - JOKER_COST * jokers_used + if future { 15 } else { 0 });
     }
 
@@ -204,12 +157,18 @@ fn evaluate(before: &GameState, action: &Action, seat: usize) -> Option<i32> {
 
     // Selain itu: sedikit poin tersisa, sedikit kartu, masih punya langkah berikutnya
     // (pemain tanpa langkah otomatis mati), dan hemat joker.
-    let future = can_extend(hand, &g.table)
+    let future = can_extend(hand, &g.table, &g.sets)
         || can_open(hand)
-        || can_kill(hand)
+        || can_kill(hand, &g.sets)
         || can_add_dead(hand, &g.sets)
         || can_revive_dead(hand, &g.sets);
-    Some(-pts - 2 * hand.len() as i32 + if future { 20 } else { -30 } - JOKER_COST * jokers_used)
+    // Yang pertama kali mematikan kartu di ronde ini kena penalti poin.
+    let first_kill = if before.sets.is_empty() && !g.sets.is_empty() {
+        FIRST_KILL_PENALTY
+    } else {
+        0
+    };
+    Some(-pts - 2 * hand.len() as i32 + if future { 20 } else { -30 } - JOKER_COST * jokers_used - first_kill)
 }
 
 /// Pilih satu aksi terbaik untuk `seat`, atau None kalau kursi itu tidak bisa bergerak
@@ -238,10 +197,10 @@ pub fn choose(g: &GameState, seat: usize) -> Option<Action> {
         consider(Action::NewSeries { cards });
     }
     if g.phase == Phase::Playing {
-        for (series, cards) in extend_candidates(hand, &g.table) {
+        for (series, cards) in extend_candidates(hand, &g.table, &g.sets) {
             consider(Action::Extend { series, cards });
         }
-        for cards in kill_candidates(hand) {
+        for cards in kill_candidates(hand, &g.sets) {
             consider(Action::Kill { cards });
         }
         for (set, cards) in add_dead_candidates(hand, &g.sets) {
