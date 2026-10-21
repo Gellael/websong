@@ -16,6 +16,12 @@ const SUITS: [Suit; 4] = [Suit::Diamonds, Suit::Clubs, Suit::Hearts, Suit::Spade
 
 /// Joker yang dipakai dianggap "mahal": hanya dikeluarkan kalau memberi keuntungan jelas.
 const JOKER_COST: i32 = 20;
+/// Bot lebih suka main seri; mematikan kartu hanya dipilih kalau tidak ada pilihan lain
+/// atau kill itu membuka jalan untuk menghabiskan kartu.
+const KILL_PENALTY: i32 = 45;
+/// Menambah kartu ke set mati: tidak seburuk kill baru, tapi tetap di bawah seri.
+const ADD_DEAD_PENALTY: i32 = 10;
+
 
 fn points(hand: &[Card]) -> i32 {
     hand.iter().map(|c| c.points()).sum()
@@ -125,6 +131,19 @@ fn revive_dead_candidates(hand: &[Card], sets: &[DeadSet]) -> Vec<(usize, Vec<Ca
         .collect()
 }
 
+/// Apakah ada SATU langkah yang langsung menghabiskan semua kartu di tangan?
+fn can_go_out(hand: &[Card], table: &[Series], sets: &[DeadSet]) -> bool {
+    let n = hand.len();
+    if n == 0 {
+        return false;
+    }
+    series_candidates(hand).iter().any(|c| c.len() == n)
+        || extend_candidates(hand, table, sets).iter().any(|(_, c)| c.len() == n)
+        || kill_candidates(hand, sets).iter().any(|c| c.len() == n)
+        || add_dead_candidates(hand, sets).iter().any(|(_, c)| c.len() == n)
+        || revive_dead_candidates(hand, sets).iter().any(|(_, c)| c.len() == n)
+}
+
 /// Nilai sebuah langkah (makin besar makin bagus). None kalau langkahnya tidak sah.
 fn evaluate(before: &GameState, action: &Action, seat: usize) -> Option<i32> {
     let mut g = before.clone();
@@ -168,7 +187,19 @@ fn evaluate(before: &GameState, action: &Action, seat: usize) -> Option<i32> {
     } else {
         0
     };
-    Some(-pts - 2 * hand.len() as i32 + if future { 20 } else { -30 } - JOKER_COST * jokers_used - first_kill)
+    // Utamakan seri: kill / tambah kartu mati dipenalti, kecuali langkah itu membuat
+    // bot bisa menghabiskan kartu di giliran berikutnya (jalan menuju menang).
+    let action_bias = match action {
+        Action::Kill { .. } if !can_go_out(hand, &g.table, &g.sets) => KILL_PENALTY,
+        Action::AddDead { .. } if !can_go_out(hand, &g.table, &g.sets) => ADD_DEAD_PENALTY,
+        _ => 0,
+    };
+    Some(
+        -pts - 2 * hand.len() as i32 + if future { 20 } else { -30 }
+            - JOKER_COST * jokers_used
+            - first_kill
+            - action_bias,
+    )
 }
 
 /// Pilih satu aksi terbaik untuk `seat`, atau None kalau kursi itu tidak bisa bergerak
