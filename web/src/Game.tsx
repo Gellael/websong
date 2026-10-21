@@ -383,14 +383,32 @@ export default function Game({
 
   const hand = sortHand(view.hand, sort)
   const chosen = hand.filter((c) => selected.includes(c.id))
+
+  // Rank "terkunci" = ada set mati dengan rank itu yang belum dihidupkan lagi (revived).
+  const lockedRanks = new Set(
+    view.sets
+      .filter((s) => !(s as unknown as { revived?: boolean }).revived)
+      .map((s) => s.rank),
+  )
+
   let options: Option[] = []
   if (canAct && chosen.length > 0) {
+    // Seri baru tetap boleh memuat rank terkunci.
     options = newSeriesOptions(chosen)
     if (myTurn) {
+      // 1 kartu asli dari rank terkunci: tidak boleh disambung ke seri, hanya ke set mati.
+      // Joker / A♠ tidak pernah terkunci, dan 2 kartu sekaligus (5,6 / 6,7 / K,A) tetap boleh.
+      const singleLocked =
+        chosen.length === 1 && !isJoker(chosen[0]) && lockedRanks.has(chosen[0].rank)
+
+      // Rank yang sudah dimatikan tidak bisa dimatikan lagi, harus ditambah ke set mati.
+      const killRank = chosen.find((c) => !isJoker(c))?.rank
+      const killLocked = killRank !== undefined && lockedRanks.has(killRank)
+
       options = [
         ...options,
-        ...extendOptions(chosen, view.table),
-        ...killOptions(chosen),
+        ...(singleLocked ? [] : extendOptions(chosen, view.table)),
+        ...(killLocked ? [] : killOptions(chosen)),
         ...addDeadOptions(chosen, view.sets),
       ]
     }

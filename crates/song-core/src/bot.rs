@@ -16,11 +16,7 @@ const SUITS: [Suit; 4] = [Suit::Diamonds, Suit::Clubs, Suit::Hearts, Suit::Spade
 
 /// Joker yang dipakai dianggap "mahal": hanya dikeluarkan kalau memberi keuntungan jelas.
 const JOKER_COST: i32 = 20;
-/// Bot lebih suka main seri; mematikan kartu hanya dipilih kalau tidak ada pilihan lain
-/// atau kill itu membuka jalan untuk menghabiskan kartu.
-const KILL_PENALTY: i32 = 45;
-/// Menambah kartu ke set mati: tidak seburuk kill baru, tapi tetap di bawah seri.
-const ADD_DEAD_PENALTY: i32 = 10;
+
 
 
 fn points(hand: &[Card]) -> i32 {
@@ -144,8 +140,15 @@ fn can_go_out(hand: &[Card], table: &[Series], sets: &[DeadSet]) -> bool {
         || revive_dead_candidates(hand, sets).iter().any(|(_, c)| c.len() == n)
 }
 
+fn is_series_move(a: &Action) -> bool {
+    matches!(a, Action::NewSeries { .. } | Action::Extend { .. })
+}
+
 /// Nilai sebuah langkah (makin besar makin bagus). None kalau langkahnya tidak sah.
-fn evaluate(before: &GameState, action: &Action, seat: usize) -> Option<i32> {
+/// Nilai sebuah langkah (makin besar makin bagus) + penanda "menentukan":
+/// langkah itu langsung menang, atau menyisakan tangan yang bisa dihabiskan dalam satu langkah.
+/// None kalau langkahnya tidak sah.
+fn evaluate(before: &GameState, action: &Action, seat: usize) -> Option<(i32, bool)> {
     let mut g = before.clone();
     g.apply(seat, action.clone()).ok()?;
 
@@ -158,24 +161,26 @@ fn evaluate(before: &GameState, action: &Action, seat: usize) -> Option<i32> {
     if before.phase == Phase::Opening {
         let removed = points(&before.hands[seat]) - pts;
         let future = can_open(hand) || can_kill(hand, &g.sets);
-        return Some(removed - JOKER_COST * jokers_used + if future { 15 } else { 0 });
+        return Some((
+            removed - JOKER_COST * jokers_used + if future { 15 } else { 0 },
+            false,
+        ));
     }
 
     // Menghabiskan kartu: Song (-100) lebih baik dari Leng (-50).
     if g.phase == Phase::Over {
         if let Some(r) = &g.result {
             if r.winner == Some(seat) {
-                return Some(match r.outcome {
+                let v = match r.outcome {
                     Outcome::Song => 10_000,
                     Outcome::Leng => 9_000,
                     Outcome::AllDead => 0,
-                });
+                };
+                return Some((v, true));
             }
         }
     }
 
-    // Selain itu: sedikit poin tersisa, sedikit kartu, masih punya langkah berikutnya
-    // (pemain tanpa langkah otomatis mati), dan hemat joker.
     let future = can_extend(hand, &g.table, &g.sets)
         || can_open(hand)
         || can_kill(hand, &g.sets)
@@ -187,23 +192,25 @@ fn evaluate(before: &GameState, action: &Action, seat: usize) -> Option<i32> {
     } else {
         0
     };
-    // Utamakan seri: kill / tambah kartu mati dipenalti, kecuali langkah itu membuat
-    // bot bisa menghabiskan kartu di giliran berikutnya (jalan menuju menang).
-    let action_bias = match action {
-        Action::Kill { .. } if !can_go_out(hand, &g.table, &g.sets) => KILL_PENALTY,
-        Action::AddDead { .. } if !can_go_out(hand, &g.table, &g.sets) => ADD_DEAD_PENALTY,
-        _ => 0,
-    };
-    Some(
+    // Hanya langkah mati yang perlu dicek "menentukan" (hemat hitungan).
+    let decisive = !is_series_move(action) && can_go_out(hand, &g.table, &g.sets);
+
+    Some((
         -pts - 2 * hand.len() as i32 + if future { 20 } else { -30 }
             - JOKER_COST * jokers_used
-            - first_kill
-            - action_bias,
-    )
+            - first_kill,
+        decisive,
+    ))
 }
 
 /// Pilih satu aksi terbaik untuk `seat`, atau None kalau kursi itu tidak bisa bergerak
 /// (mati, bukan gilirannya, atau sudah menurunkan seri pembuka).
+/// Pilih satu aksi terbaik untuk `seat`, atau None kalau kursi itu tidak bisa bergerak
+/// (mati, bukan gilirannya, atau sudah menurunkan seri pembuka).
+///
+/// Prioritas: seri dulu (seri baru / sambung seri). Langkah mati (kill, tambah kartu mati,
+/// revive) hanya dipilih kalau tidak ada langkah seri, atau kalau langkah mati itu
+/// "menentukan" (langsung menang / menyisakan tangan yang bisa habis dalam satu langkah).
 pub fn choose(g: &GameState, seat: usize) -> Option<Action> {
     if seat >= PLAYERS || !g.alive[seat] {
         return None;
@@ -215,12 +222,23 @@ pub fn choose(g: &GameState, seat: usize) -> Option<Action> {
     }
 
     let hand = &g.hands[seat];
-    let mut best: Option<(i32, Action)> = None;
+    let mut best_series: Option<(i32, Action)> = None;
+    let mut best_smart: Option<(i32, Action)> = None; // langkah mati yang menentukan
+    let mut best_dead: Option<(i32, Action)> = None; // langkah mati biasa
+
     let mut consider = |action: Action| {
-        if let Some(v) = evaluate(g, &action, seat) {
-            if best.as_ref().map_or(true, |(b, _)| v > *b) {
-                best = Some((v, action));
-            }
+        let Some((v, decisive)) = evaluate(g, &action, seat) else {
+            return;
+        };
+        let slot = if is_series_move(&action) {
+            &mut best_series
+        } else if decisive {
+            &mut best_smart
+        } else {
+            &mut best_dead
+        };
+        if slot.as_ref().map_or(true, |(b, _)| v > *b) {
+            *slot = Some((v, action));
         }
     };
 
@@ -242,7 +260,17 @@ pub fn choose(g: &GameState, seat: usize) -> Option<Action> {
         }
     }
 
-    best.map(|(_, action)| action)
+    let pick = match (best_series, best_smart, best_dead) {
+        // seri yang langsung menghabiskan kartu: tidak ada yang mengalahkan
+        (Some(s), _, _) if s.0 >= 9_000 => Some(s),
+        // langkah mati yang menentukan mengalahkan seri biasa
+        (_, Some(k), _) => Some(k),
+        // normal: seri dulu
+        (Some(s), None, _) => Some(s),
+        // tidak ada seri sama sekali: opsi terakhir, langkah mati terbaik
+        (None, None, d) => d,
+    };
+    pick.map(|(_, action)| action)
 }
 
 #[cfg(test)]
