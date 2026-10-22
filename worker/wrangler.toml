@@ -23,4 +23,4 @@ new_sqlite_classes = ["SongRegistry"]
 
 [vars]
 # Kosong = semua asal diizinkan (dev). Isi alamat Pages saat deploy.
-ALLOWED_ORIGINS = "https://songin.pages.dev"
+ALLOWED_ORIGINS = "https://songin.my.id"
