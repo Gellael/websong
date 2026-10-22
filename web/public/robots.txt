@@ -1,0 +1,4 @@
+User-agent: *
+Allow: /
+
+Sitemap: https://songin.my.id/sitemap.xml

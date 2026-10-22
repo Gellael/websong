@@ -1,13 +1,69 @@
 <!doctype html>
-<html lang="en">
+<html lang="id">
   <head>
     <meta charset="UTF-8" />
-    <link rel="icon" type="image/svg+xml" href="/favicon.svg?v=2" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>SongIn</title>
+
+    <!-- Favicon -->
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg?v=2" />
+
+    <!-- SEO dasar -->
+    <title>SongIn - Main Kartu Song Online Gratis</title>
+    <meta
+      name="description"
+      content="SongIn adalah game kartu Song online. Main bareng teman atau lawan pemain lain langsung dari browser, tanpa perlu install."
+    />
+    <meta name="keywords" content="kartu song, game kartu online, main kartu song, songin" />
+    <meta name="author" content="SongIn" />
+    <meta name="robots" content="index, follow" />
+    <link rel="canonical" href="https://songin.my.id/" />
+    <meta name="theme-color" content="#dc2626" />
+
+    <!-- Open Graph (Facebook, WhatsApp, Telegram, dll) -->
+    <meta property="og:type" content="website" />
+    <meta property="og:site_name" content="SongIn" />
+    <meta property="og:locale" content="id_ID" />
+    <meta property="og:url" content="https://songin.my.id/" />
+    <meta property="og:title" content="SongIn - Main Kartu Song Online Gratis" />
+    <meta
+      property="og:description"
+      content="Main kartu Song online bareng teman langsung dari browser."
+    />
+    <meta property="og:image" content="https://songin.my.id/og-image.png" />
+    <meta property="og:image:width" content="1200" />
+    <meta property="og:image:height" content="630" />
+
+    <!-- Twitter / X -->
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content="SongIn - Main Kartu Song Online Gratis" />
+    <meta
+      name="twitter:description"
+      content="Main kartu Song online bareng teman langsung dari browser."
+    />
+    <meta name="twitter:image" content="https://songin.my.id/og-image.png" />
+
+    <!-- Structured data (JSON-LD) -->
+    <script type="application/ld+json">
+      {
+        "@context": "https://schema.org",
+        "@type": "WebApplication",
+        "name": "SongIn",
+        "url": "https://songin.my.id/",
+        "description": "Game kartu Song online yang bisa dimainkan langsung dari browser.",
+        "applicationCategory": "GameApplication",
+        "operatingSystem": "Web",
+        "inLanguage": "id",
+        "offers": { "@type": "Offer", "price": "0", "priceCurrency": "IDR" }
+      }
+    </script>
   </head>
   <body>
     <div id="root"></div>
+    <!-- Konten untuk crawler / jika JavaScript mati -->
+    <noscript>
+      <h1>SongIn - Main Kartu Song Online</h1>
+      <p>Aktifkan JavaScript untuk memainkan game kartu Song di SongIn.</p>
+    </noscript>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>
