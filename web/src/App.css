@@ -68,7 +68,7 @@ button { font-family: inherit; }
   display: flex;
   color: rgb(255, 37, 37);
 }
-.hero-logo.small { font-size: 48px; }
+.hero-logo.small { font-size: 48px; padding-bottom: 8px; }
 .hero-logo.tiny { font-size: 32px; margin: 0; }
 .hero-logo2.tiny { font-size: 32px; margin: 0; }
 
@@ -173,7 +173,7 @@ button { font-family: inherit; }
 .pill.btnlike { cursor: pointer; }
 .pill.btnlike:hover { border-color: var(--gold); }
 
-.waittable { position: relative; width: min(560px, 100%); height: 330px; margin: 10px 0 6px; }
+.waittable { position: relative; width: min(560px, 100%); height: 340px; margin: 56px 0 14px; }
 .waitfelt {
   position: absolute; inset: 40px 60px; display: grid; place-items: center; border-radius: 50%; border: 10px solid #5a3b1c;
   background: radial-gradient(ellipse at center, #1e7a51 0%, var(--felt) 65%, var(--felt-d) 100%);
@@ -415,4 +415,12 @@ button.roomtag { cursor: pointer; }
   filter: brightness(0);   /* ubah logo putih menjadi hitam */
   pointer-events: none;
   user-select: none;
+}
+
+@media (max-height: 950px) {
+  .codebox b { font-size: 36px; letter-spacing: 8px; }
+  .waittable { height: 270px; margin: 50px 0 10px; }
+  .waitfelt { inset: 30px 60px; }
+  .waitcount b { font-size: 48px; }
+  .w2, .w3 { top: 84%; }
 }

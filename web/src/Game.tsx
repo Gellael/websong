@@ -230,7 +230,7 @@ export default function Game({
       <div className="landing">
         <MusicToggle floating />
         <main className="screen center">
-          <h1 className="hero-logo small">Song</h1>
+          <h1 className="hero-logo small">SongIn</h1>
           <p className="tagline">Ruang tunggu</p>
 
           <button type="button" className="codebox" onClick={() => copy(room, 'code')}>
